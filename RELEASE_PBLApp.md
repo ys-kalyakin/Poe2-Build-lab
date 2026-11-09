@@ -1,12 +1,13 @@
 # Release process — PoE2 Build Lab (PBLApp, Avalonia)
 
-How to cut a public Windows build of the C#/Avalonia app. (The upstream Lua PoB
-release flow — GitHub Actions + NSIS — does not apply here and its `RELEASE.md`
-was dropped from this fork.)
+How to cut a public Windows and Linux build of the C#/Avalonia app. (The
+upstream Lua PoB release flow — GitHub Actions + NSIS — does not apply here and
+its `RELEASE.md` was dropped from this fork.)
 
 Derived from the existing releases (`publish/PoE2BuildLab-win-x64-v0.1.zip`,
-`…-v0.1.1.zip`), the publish profile
-`PBLApp/Properties/PublishProfiles/win-x64.pubxml`, and Phase 12 of
+`…-v0.1.1.zip`), the publish profiles
+`PBLApp/Properties/PublishProfiles/win-x64.pubxml` and
+`PBLApp/Properties/PublishProfiles/linux-x64.pubxml`, and Phase 12 of
 [`AVALONIA_MIGRATION_PLAN.md`](AVALONIA_MIGRATION_PLAN.md).
 
 Only `PBLApp` ships. `PBLEngine` / `PBLApp.Core` are bundled inside it; `PBLMcp`,
@@ -18,7 +19,8 @@ A release is identified by one version string `MAJOR.MINOR[.PATCH]` (e.g. `0.1`,
 `0.1.1`). It must match in three places — bump all three together:
 
 1. **`PBLApp/PBLApp.csproj`** → `<Version>0.1.1</Version>` (stamps the exe).
-2. **Archive file name** → `publish/PoE2BuildLab-win-x64-v<version>-poe<gameVersion>.zip`,
+2. **Archive file names** → `publish/PoE2BuildLab-win-x64-v<version>-poe<gameVersion>.zip`
+   and `publish/PoE2BuildLab-linux-x64-v<version>-poe<gameVersion>.tar.gz`,
    where `<gameVersion>` is the PoE2 game patch (e.g. `0.5.2`), read from
    `game_version:` in `.upstream-sync.yaml`. NOTE: this is the **game** version,
    not the PoB tool version in `manifest.xml` (`0.21.0`) — they differ.
@@ -32,9 +34,10 @@ plus the tag annotation is the record.
 
 Releases are cut by [`.github/workflows/release.yml`](.github/workflows/release.yml).
 Bump `<Version>` in `PBLApp.csproj`, commit, then push an annotated `v<version>`
-tag — the workflow runs the tests, publishes win-x64, zips it, verifies the
-archive, computes the SHA-256 and creates the GitHub Release with the archive
-attached. The workflow refuses to run if the tag and the csproj version disagree.
+tag — the workflow runs the tests once, publishes win-x64 and linux-x64 in
+parallel, packs both archives (zip / tar.gz), verifies them, computes SHA-256
+and creates the GitHub Release with both archives attached. The workflow
+refuses to run if the tag and the csproj version disagree.
 
 ```powershell
 git tag -a v0.3 -m "PoE2 Build Lab v0.3"
@@ -112,7 +115,8 @@ Run from the repo root in PowerShell.
 
 | Path                      | What                                                   |
 |---                        |---                                                     |
-| `PBLApp.exe`              | Single-file self-contained app (~58 MB)                |
+| `PBLApp.exe` / `PBLApp`   | Single-file self-contained app (~58 MB; ELF on Linux)  |
+| `liblua54.so`, `libSkiaSharp.so`, `libHarfBuzzSharp.so` | Linux only: native libs next to the binary |
 | `Assets/TreeData/<ver>/`  | Passive-tree sprite sheets (WebP, copied as Content)   |
 | `ItemIcons/`              | Item / gem icon sprites                                |
 | `src/`                    | Lua calc engine sources (`CopyEngineFiles` target)     |

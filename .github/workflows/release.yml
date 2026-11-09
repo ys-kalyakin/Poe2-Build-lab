@@ -1,6 +1,6 @@
 name: Release
 
-# Publishes a Windows x64 build when a v* tag is pushed.
+# Publishes Windows x64 and Linux x64 builds when a v* tag is pushed.
 # Mirrors the manual procedure in RELEASE_PBLApp.md — keep the two in sync.
 
 on:
@@ -17,9 +17,38 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Publish win-x64
+  test:
+    name: Test
     runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      # LuaHost init takes ~40 s and every test class shares one instance, so
+      # the whole suite runs sequentially — 232 tests, ~17 min. Hence the
+      # generous job timeout above.
+      - name: Test
+        run: dotnet test PBLEngine.Tests/PBLEngine.Tests.csproj -c Release --nologo -v minimal
+
+  build:
+    name: Publish ${{ matrix.runtime }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runtime: win-x64
+            os: windows-latest
+          - runtime: linux-x64
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 90
 
     steps:
@@ -31,20 +60,18 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
-      - name: Test
-        run: dotnet test PBLEngine.Tests/PBLEngine.Tests.csproj -c Release --nologo -v minimal
-
       # Version comes from the csproj (it stamps the exe); the game version goes
       # into the archive name. Both are single sources of truth — see RELEASE_PBLApp.md.
       - name: Read versions
         id: ver
         shell: pwsh
         run: |
-          $ver  = (Select-String 'PBLApp\PBLApp.csproj' -Pattern '<Version>([0-9.]+)</Version>').Matches[0].Groups[1].Value
+          $ver  = (Select-String 'PBLApp/PBLApp.csproj' -Pattern '<Version>([0-9.]+)</Version>').Matches[0].Groups[1].Value
           $game = (Select-String '.upstream-sync.yaml' -Pattern '^game_version:\s*([0-9.]+)').Matches[0].Groups[1].Value
+          $ext  = "${{ matrix.runtime == 'win-x64' && 'zip' || 'tar.gz' }}"
           "version=$ver"   >> $env:GITHUB_OUTPUT
           "game=$game"     >> $env:GITHUB_OUTPUT
-          "archive=PoE2BuildLab-win-x64-v$ver-poe$game.zip" >> $env:GITHUB_OUTPUT
+          "archive=PoE2BuildLab-${{ matrix.runtime }}-v$ver-poe$game.$ext" >> $env:GITHUB_OUTPUT
 
       # A tag that disagrees with the csproj version would ship an exe stamped
       # with the wrong number — fail loudly instead.
@@ -58,11 +85,12 @@ jobs:
           }
 
       - name: Publish
-        run: dotnet publish PBLApp/PBLApp.csproj -p:PublishProfile=win-x64 -o publish/win-x64
+        run: dotnet publish PBLApp/PBLApp.csproj -p:PublishProfile=${{ matrix.runtime }} -o publish/${{ matrix.runtime }}
 
       # Compress-Archive would nest everything under a win-x64/ folder;
       # CreateFromDirectory(includeBaseDirectory: $false) keeps PBLApp.exe at the root.
-      - name: Create archive
+      - name: Create archive (zip)
+        if: matrix.runtime == 'win-x64'
         shell: pwsh
         run: |
           $out = "publish/${{ steps.ver.outputs.archive }}"
@@ -71,7 +99,8 @@ jobs:
               (Resolve-Path 'publish/win-x64'), (Join-Path (Get-Location) $out),
               [System.IO.Compression.CompressionLevel]::Optimal, $false)
 
-      - name: Verify archive
+      - name: Verify archive (zip)
+        if: matrix.runtime == 'win-x64'
         shell: pwsh
         run: |
           $out = "publish/${{ steps.ver.outputs.archive }}"
@@ -86,6 +115,31 @@ jobs:
           if (-not $hasTree) { throw 'Assets/TreeData/* missing from the archive' }
           if ($entries -lt 1000) { throw "Only $entries entries — the publish output looks incomplete" }
 
+      # tar (unlike zip) preserves the executable bit of PBLApp; `.` keeps the
+      # archive contents at the root, matching the Windows zip layout.
+      - name: Create archive (tar.gz)
+        if: matrix.runtime == 'linux-x64'
+        run: |
+          out="publish/${{ steps.ver.outputs.archive }}"
+          tar -czf "$out" -C publish/linux-x64 .
+
+      - name: Verify archive (tar.gz)
+        if: matrix.runtime == 'linux-x64'
+        run: |
+          out="publish/${{ steps.ver.outputs.archive }}"
+          entries=$(tar -tzf "$out" | wc -l)
+          has_bin=$(tar -tzf "$out" | grep -cE '^\./PBLApp$' || true)
+          has_tree=$(tar -tzf "$out" | grep -cE '^\./Assets/TreeData/' || true)
+          exec_line=$(tar -tvzf "$out" | grep ' \./PBLApp$' | head -1 || true)
+          echo "entries: $entries; PBLApp at root: $has_bin; TreeData: $has_tree; perms: $exec_line"
+          if [ "$has_bin" -ne 1 ]; then echo '::error::PBLApp is not at the archive root'; exit 1; fi
+          if [ "$has_tree" -lt 1 ]; then echo '::error::Assets/TreeData/* missing from the archive'; exit 1; fi
+          case "$exec_line" in
+            -rwx*) : ;;
+            *) echo '::error::PBLApp lost its executable bit in the archive'; exit 1 ;;
+          esac
+          if [ "$entries" -lt 1000 ]; then echo "::error::Only $entries entries — the publish output looks incomplete"; exit 1; fi
+
       # The build is unsigned, so publish the hash for anyone who wants to
       # verify the download. See docs/CODE_SIGNING.md for the signing roadmap.
       - name: Compute SHA-256
@@ -93,28 +147,100 @@ jobs:
         shell: pwsh
         run: |
           $out = "publish/${{ steps.ver.outputs.archive }}"
-          $h = (Get-FileHash $out -Algorithm SHA256).Hash
+          $h = (Get-FileHash (Resolve-Path $out) -Algorithm SHA256).Hash.ToLowerInvariant()
           "sha256=$h" >> $env:GITHUB_OUTPUT
+
+      # Fragment of the release body — assembled by the `release` job below.
+      - name: Write release body fragment
+        shell: pwsh
+        run: |
+          $runtime = '${{ matrix.runtime }}'
+          if ($runtime -eq 'win-x64') {
+            $text = @'
+          **Windows 10/11 x64** — запустите `PBLApp.exe` из распакованной папки.
+
+          Сборка не подписана — SmartScreen предупредит про неизвестного
+          издателя. Проверить целостность архива можно по хешу:
+
+          ```
+          SHA-256: ${{ steps.hash.outputs.sha256 }}
+          ```
+          '@
+          } else {
+            $text = @'
+          **Linux x64** — распакуйте архив (`tar xzf <файл>`) и запустите `./PBLApp`;
+          право на исполнение сохранено в архиве. Нужны стандартные системные
+          библиотеки X11/OpenGL — на обычных десктопных дистрибутивах они есть.
+
+          Проверить целостность архива можно по хешу:
+
+          ```
+          SHA-256: ${{ steps.hash.outputs.sha256 }}
+          ```
+          '@
+          }
+          Set-Content -Path "publish/body-$runtime.md" -Value $text -Encoding utf8
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.runtime }}
+          path: |
+            publish/PoE2BuildLab-*
+            publish/body-*.md
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: publish
+
+      - name: Read versions
+        id: ver
+        run: |
+          version=$(grep -oPm1 '(?<=<Version>)[0-9.]+' PBLApp/PBLApp.csproj)
+          game=$(sed -nE 's/^game_version:[[:space:]]*([0-9.]+).*/\1/p' .upstream-sync.yaml)
+          tag="${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', version) }}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "game=$game"       >> "$GITHUB_OUTPUT"
+          echo "tag=$tag"         >> "$GITHUB_OUTPUT"
+
+      - name: Assemble release body
+        run: |
+          {
+            echo "**Path of Exile 2 — ${{ steps.ver.outputs.game }}**"
+            echo
+            echo "Распакуйте архив в любую папку; .NET устанавливать не нужно."
+            echo
+            cat publish/body-win-x64.md
+            echo
+            echo "---"
+            echo
+            cat publish/body-linux-x64.md
+            echo
+            echo "[Telegram](https://t.me/PoE2BuildLab) · [Boosty](https://boosty.to/poe2buildlab)"
+          } > publish/body.md
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           name: PoE2 Build Lab v${{ steps.ver.outputs.version }}
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', steps.ver.outputs.version) }}
+          tag_name: ${{ steps.ver.outputs.tag }}
           draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
           generate_release_notes: true
-          files: publish/${{ steps.ver.outputs.archive }}
-          body: |
-            **Path of Exile 2 — ${{ steps.ver.outputs.game }}**
-
-            Распакуйте архив в любую папку и запустите `PBLApp.exe`.
-            Windows 10/11 x64, .NET устанавливать не нужно.
-
-            Сборка не подписана — SmartScreen предупредит про неизвестного
-            издателя. Проверить целостность архива можно по хешу:
-
-            ```
-            SHA-256: ${{ steps.hash.outputs.sha256 }}
-            ```
-
-            [Telegram](https://t.me/PoE2BuildLab) · [Boosty](https://boosty.to/poe2buildlab)
+          body_path: publish/body.md
+          files: |
+            publish/PoE2BuildLab-*.zip
+            publish/PoE2BuildLab-*.tar.gz

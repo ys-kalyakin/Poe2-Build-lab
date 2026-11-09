@@ -37,7 +37,7 @@ calculation engine is the original, battle-tested PoB one.
 </p>
 
 <p align="center">
-  <sub>Windows 10/11 x64 · без установки · .NET не требуется —
+  <sub>Windows 10/11 и Linux, x64 · без установки · .NET не требуется —
   <a href="https://github.com/Visp1024/Poe2-Build-lab/releases">все версии</a></sub>
 </p>
 
@@ -70,7 +70,7 @@ calculation engine is the original, battle-tested PoB one.
 
 Все сборки — на странице [Releases](https://github.com/Visp1024/Poe2-Build-lab/releases).
 
-- Windows 10/11, x64;
+- Windows 10/11 и Linux, x64;
 - устанавливать ничего не нужно: архив распаковывается в любую папку и запускается;
 - .NET на компьютере **не требуется** — он уже внутри сборки.
 
@@ -173,7 +173,7 @@ Path of Exile 2 — торговая марка Grinding Gear Games. Проек�
 
 All builds are on the [Releases](https://github.com/Visp1024/Poe2-Build-lab/releases) page.
 
-- Windows 10/11, x64;
+- Windows 10/11 and Linux, x64;
 - no installer — unpack the archive anywhere and run it;
 - **no .NET runtime required** — it is bundled inside the build.
 
