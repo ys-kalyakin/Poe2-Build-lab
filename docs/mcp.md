@@ -88,7 +88,10 @@ dotnet build PBLMcp/PBLMcp.csproj -c Release
 (имя/уровень/качество/вкл одним вызовом) · `visual_skills_set_group`
 (вкл/FullDPS/метка) · `visual_skills_set_main` — активная группа для Full DPS ·
 `visual_skills_tooltips` · `visual_skills_support_picker` /
-`support_set_tab` / `support_set_mode` / `support_select`
+`support_set_tab` / `support_set_mode` / `support_select` ·
+`visual_skills_dps` — разбивка Full DPS по скилам + итоги + флаги групп
+(группа не видна? включи ей `includeInFullDps` через `visual_skills_set_group`
+и перечитай)
 
 ### Каталог гемов (какие гемы существуют)
 `visual_gems_list {query?, type?, tag?, weapon?}` — каталог гемов из данных

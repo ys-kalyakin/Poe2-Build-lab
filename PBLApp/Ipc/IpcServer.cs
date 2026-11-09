@@ -187,6 +187,7 @@ public sealed class IpcServer
                 "/tree/nodes"             => await OnUi(() => TreeNodes(body)),
                 "/skills/tooltips"        => await OnUi(SkillsTooltips),
                 "/skills/list"            => await OnUi(SkillsList),
+                "/skills/dps"             => await OnUi(SkillsDps),
                 "/skills/gem-catalog"     => await OnUi(() => GemCatalog(body)),
                 "/skills/gem-tooltip"     => await OnUi(() => GemTooltip(body)),
                 "/skills/add-group"       => await OnUi(() => SkillsAddGroup(body)),
@@ -828,6 +829,39 @@ public sealed class IpcServer
     {
         if (SkillsVmOrError(out var err) is not { } v) return err;
         return SkillsListing(v);
+    }
+
+    /// <summary>DPS-разрез: разбивка Full DPS по скилам (только группы с
+    /// includeInFullDPS) + итоги + метаданные групп. Чистый read: группу не
+    /// видно — включи ей includeInFullDps (/skills/set-group) и перечитай.</summary>
+    private static object SkillsDps()
+    {
+        var host = ItemDataHost();
+        if (host is null) return new { error = "No build page open or engine not ready." };
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        var stats = bp.Build?.AllStats;
+        if (stats is null) return new { error = "Build not loaded yet." };
+        var mainIdx = host.GetMainSkillGroupIndex();
+        return new
+        {
+            ok       = true,
+            totalDps = stats.TryGetValue("TotalDPS", out var td) ? td : null,
+            fullDps  = stats.TryGetValue("FullDPS", out var fd) ? fd : null,
+            skills   = host.GetFullDpsBreakdown().Select(s => new
+            {
+                name  = s.Name,
+                dps   = s.Dps,
+                count = s.Count,
+                total = s.Total,
+            }).ToArray(),
+            groups = host.GetSkillGroups().Select(g => new
+            {
+                index            = g.Index,
+                name             = g.Name,
+                isMain           = g.Index == mainIdx,
+                includeInFullDps = g.IncludeInFullDPS,
+            }).ToArray(),
+        };
     }
 
     // Каталог гемов статичен в рамках версии данных — кэшируем на процесс.

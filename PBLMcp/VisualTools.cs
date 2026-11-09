@@ -836,6 +836,18 @@ public class VisualTools
 
     [McpServerTool]
     [Description(
+        "DPS breakdown: per-skill contributions to Full DPS (name, dps, count, total), " +
+        "combined fullDps, main-skill totalDps, and every skill group with isMain / " +
+        "includeInFullDps flags. Read-only. A group is missing from 'skills'? Set its " +
+        "includeInFullDps with visual_skills_set_group and call this again.")]
+    public async Task<string> VisualSkillsDps()
+    {
+        try { return await IpcClient.CallAsync("GET", "/skills/dps"); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
         "Search the application's own gem catalogue (active and support gems that exist in its " +
         "game data): name, tags, attribute requirements, max level, mana cost, weapon requirements, " +
         "description. Use BEFORE visual_skills_add_group/add_gem — the app only accepts exact " +
