@@ -57,6 +57,26 @@ public class VisualTools
             psi.UseShellExecute  = false;
             psi.WorkingDirectory = repoRoot;
             psi.CreateNoWindow   = false;
+
+            // The apphost resolves libhostfxr via DOTNET_ROOT (or PATH). MCP
+            // host processes often have neither — probe the usual locations.
+            if (!OperatingSystem.IsWindows() && string.IsNullOrEmpty(
+                    psi.EnvironmentVariables["DOTNET_ROOT"]))
+            {
+                foreach (var cand in new[]
+                         {
+                             Environment.GetEnvironmentVariable("DOTNET_ROOT"),
+                             "/usr/share/dotnet", "/usr/lib/dotnet",
+                             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dotnet"),
+                         })
+                {
+                    if (!string.IsNullOrEmpty(cand) && File.Exists(Path.Combine(cand, "libhostfxr.so")))
+                    {
+                        psi.EnvironmentVariables["DOTNET_ROOT"] = cand;
+                        break;
+                    }
+                }
+            }
             var proc = Process.Start(psi)
                        ?? throw new InvalidOperationException("Process.Start returned null.");
 
