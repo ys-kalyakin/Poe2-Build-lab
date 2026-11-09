@@ -115,6 +115,8 @@ dotnet build PBLMcp/PBLMcp.csproj -c Release
 
 ### Статы, конфиг, сохранение
 `visual_get_stats` — все ~600 статов или фильтр `keys=TotalDPS,Life,…` ·
+`visual_stats_snapshot` / `visual_stats_diff` — снапшот статов и diff до/после
+(снапшоты стираются при открытии/импорте другого билда) ·
 `visual_config_state` / `visual_config_set` — настройки боя (враг, заряды,
 баффы — влияют на цифры) · `visual_build_save` — сохранить XML билда ·
 `visual_build_xml` — выгрузить XML наружу · `visual_notes` — читать/писать
@@ -155,8 +157,9 @@ MVVM-драйвер для тестов.
    в ответе агенту.
 
 **Сравнить два предмета**
-1. `visual_items_select_pool` (первый) → `visual_get_stats` → зафиксировать
-2. `visual_items_equip` (второй) → `visual_get_stats` → diff.
+1. `visual_stats_snapshot` — зафиксировать текущие статы
+2. `visual_items_equip` (второй предмет) → `visual_stats_diff` — changed/added/removed
+3. Откат: equip первого предмета, `visual_stats_diff` подтвердит возврат.
 
 **Построить путь на дереве**
 1. `visual_tree_nodes {query: "название узла"}` → взять id

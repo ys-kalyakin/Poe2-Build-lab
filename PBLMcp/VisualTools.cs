@@ -1,5 +1,6 @@
 using ModelContextProtocol.Server;
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
@@ -858,6 +859,35 @@ public class VisualTools
         [Description("Gem level for cost/reservation numbers. Default 20.")] int level = 20)
     {
         try { return await IpcClient.CallAsync("POST", "/skills/gem-tooltip", new { gemName, level }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Snapshot current stats (build.AllStats) under a name (default 'last'). " +
+        "Call before a tryout (equip an item, allocate nodes), change something, then " +
+        "visual_stats_diff — much cheaper than comparing full stat dumps by hand. " +
+        "Snapshots are cleared when another build is opened/imported.")]
+    public async Task<string> VisualStatsSnapshot(
+        [Description("Snapshot name. Default 'last'.")] string? name = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/stats/snapshot", new { name }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Diff stats against a snapshot: changed/added/removed keys with values. " +
+        "Compares to current stats unless 'to' names another snapshot.")]
+    public async Task<string> VisualStatsDiff(
+        [Description("Snapshot made earlier. Default 'last'.")] string? from = null,
+        [Description("Other snapshot to compare against. Default: current stats.")] string? to = null)
+    {
+        try
+        {
+            var q = new List<string>();
+            if (!string.IsNullOrEmpty(from)) q.Add($"from={Uri.EscapeDataString(from)}");
+            if (!string.IsNullOrEmpty(to)) q.Add($"to={Uri.EscapeDataString(to)}");
+            return await IpcClient.CallAsync("GET", "/stats/diff" + (q.Count > 0 ? "?" + string.Join("&", q) : ""));
+        }
         catch (Exception ex) { return Error(ex); }
     }
 

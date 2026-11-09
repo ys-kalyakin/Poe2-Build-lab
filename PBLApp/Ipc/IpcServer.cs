@@ -207,6 +207,8 @@ public sealed class IpcServer
                 "/export/open"           => await OnUi(() => ImportExportOpen(body)),
                 "/build/update-from-game" => await OnUi(UpdateFromGame),
                 "/stats"         => await OnUi(() => GetStatsFiltered(ctx.Request.Url?.Query ?? "")),
+                "/stats/snapshot" => await OnUi(() => StatsSnapshot(body)),
+                "/stats/diff"     => await OnUi(() => StatsDiffHandler(ctx.Request.Url?.Query ?? "")),
                 "/build/save"    => await OnUiAsync(BuildSave),
                 "/build/xml"     => await OnUi(BuildXml),
                 "/notes"         => ctx.Request.HttpMethod == "POST"
@@ -381,6 +383,7 @@ public sealed class IpcServer
         var req  = JsonSerializer.Deserialize<Dictionary<string, string>>(body) ?? new();
         if (GetMainVm()?.CurrentPage is not BuildListViewModel bl)
             return new { error = "Not on BuildList page." };
+        ClearStatSnapshots();   // снапшоты статов принадлежат конкретному билду
         if (!req.TryGetValue("name", out var name) || string.IsNullOrWhiteSpace(name))
             return new { error = "Missing 'name'." };
 
@@ -2208,6 +2211,70 @@ public sealed class IpcServer
 
     /// <summary>Full stat dump of the open build, optionally filtered:
     /// GET /stats?keys=TotalDPS,Life — empty keys returns all (~600) stats.</summary>
+    // ── Снапшоты статов (diff до/после примерки) ─────────────────────────────
+    // Одна сессия IPC = один клиент (токен), хранилище на процесс.
+    // Стираются при открытии/импорте другого билда — diff между билдами не имеет смысла.
+    private static readonly Dictionary<string, Dictionary<string, object?>> _statSnapshots = new();
+
+    private static void ClearStatSnapshots() => _statSnapshots.Clear();
+
+    private static object StatsSnapshot(string body)
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.Build is not { } build) return new { error = "Build not loaded yet." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body ?? "{}") ?? new();
+        var name = req.TryGetValue("name", out var n) && n.ValueKind == JsonValueKind.String &&
+                   !string.IsNullOrWhiteSpace(n.GetString())
+            ? n.GetString()! : "last";
+        _statSnapshots[name] = new Dictionary<string, object?>(build.AllStats);
+        return new { ok = true, name, keyCount = build.AllStats.Count };
+    }
+
+    private static object StatsDiffHandler(string query)
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.Build is not { } build) return new { error = "Build not loaded yet." };
+        string? Param(string key)
+        {
+            foreach (var part in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var kv = part.Split('=', 2);
+                if (kv.Length == 2 && kv[0] == key)
+                    return Uri.UnescapeDataString(kv[1]);
+            }
+            return null;
+        }
+        var fromName = Param("from") ?? "last";
+        if (!_statSnapshots.TryGetValue(fromName, out var before))
+            return new
+            {
+                error = $"No snapshot '{fromName}'. Call POST /stats/snapshot first.",
+                available = _statSnapshots.Keys.OrderBy(k => k).ToArray(),
+            };
+        var toName = Param("to");
+        IReadOnlyDictionary<string, object?> after = toName is null
+            ? build.AllStats
+            : _statSnapshots.TryGetValue(toName, out var snap)
+                ? snap
+                : new Dictionary<string, object?>();   // неизвестное имя to → пусто → всё removed
+        if (toName is not null && after.Count == 0)
+            return new
+            {
+                error = $"No snapshot '{toName}'.",
+                available = _statSnapshots.Keys.OrderBy(k => k).ToArray(),
+            };
+        var diff = StatsDiff.Compute(before, after);
+        return new
+        {
+            ok   = true,
+            from = fromName,
+            to   = toName ?? "current",
+            changed = diff.Changed.Select(c => new { key = c.Key, from = c.From, to = c.To }).ToArray(),
+            added   = diff.Added.Select(c => new { key = c.Key, to = c.To }).ToArray(),
+            removed = diff.Removed.ToArray(),
+        };
+    }
+
     private static object GetStatsFiltered(string query)
     {
         if (BuildPageOrError(out var err) is not { } bp) return err;
