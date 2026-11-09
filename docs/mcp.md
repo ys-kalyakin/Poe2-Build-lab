@@ -112,9 +112,16 @@ dotnet build PBLMcp/PBLMcp.csproj -c Release
 `visual_items_state` · `select_slot` / `select_pool` · `equip` / `unequip` ·
 `compatible_slots` · `get_tooltip` / `get_all_tooltips` · редактор:
 `editor_create_new`, `editor_set_rarity/base/unique/quality/corrupted/base_stat/mod_slider`,
-`editor_add_affix` / `remove_mod`, `editor_add_rune_socket` / `set_rune` /
-`remove_rune_socket`, `tattoo_state` / `set_tattoo`, `phylactery_state`,
-`editor_save` · `items_edit_current` / `cancel_edit`
+`editor_set_item_level`, `editor_add_affix` / `remove_mod`,
+`editor_add_rune_socket` / `set_rune` / `remove_rune_socket`,
+`tattoo_state` / `set_tattoo`, `phylactery_state`, `editor_save` ·
+`items_edit_current` / `cancel_edit`
+
+> 💡 Крафт реалистичных предметов: пул из `visual_item_affixes` уже отфильтрован
+> по spawn-маске базы (все перечисленные афиксы могут выпасть), но тиры
+> ограничены уровнем предмета — у каждого тира есть `level`; ставь
+> `editor_set_item_level` прежде чем добавлять тиры, иначе T1 на ilvl-1 базе
+> просто не добавится (ошибка подскажет требуемый ilvl).
 
 ### Статы, конфиг, сохранение
 `visual_get_stats` — все ~600 статов или фильтр `keys=TotalDPS,Life,…` ·

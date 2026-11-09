@@ -440,6 +440,18 @@ public class VisualTools
     }
 
     [McpServerTool]
+    [Description(
+        "Set the item's level (item level, 1-100) in the editor. Affix tiers with tier level " +
+        "above the item level cannot be added (visual_item_affixes shows each tier's 'level') — " +
+        "set a realistic level before crafting a tryout item, otherwise tiers silently vanish.")]
+    public async Task<string> VisualItemsEditorSetItemLevel(
+        [Description("Item level 1-100.")] int level)
+    {
+        try { return await IpcClient.CallAsync("POST", "/items/editor-set-item-level", new { level }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
     [Description("Toggle the Corrupted flag on the item. When true, mod editing is locked.")]
     public async Task<string> VisualItemsEditorSetCorrupted(
         [Description("true to mark corrupted, false to clear.")] bool value)

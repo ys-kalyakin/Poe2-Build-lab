@@ -753,6 +753,11 @@ public partial class ItemEditorViewModel : ViewModelBase
         }
     }
 
+    /// <summary>Нефильтрованный пул афиксов текущей базы — для IPC-подсказок,
+    /// почему афикс недоступен (например тиры выше item level).</summary>
+    public IReadOnlyList<AffixEntry> AllAffixEntries =>
+        _allAffixes.Select(a => a.Entry).ToList();
+
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(FilteredCorruptionAffixes))]
     private string _corruptionSearch = "";
@@ -1277,6 +1282,9 @@ public partial class ItemEditorViewModel : ViewModelBase
         if (!string.IsNullOrEmpty(e.Group) &&
             ExplicitMods.Any(m => !string.IsNullOrEmpty(m.Group) && m.Group == e.Group))
             return false;
+        // Доступность тира: мод с Level выше уровня предмета на нём не выпадает —
+        // без гейта редактор собирает фантазийные предметы (T1 на ilvl-1 базе).
+        if (e.Level > ItemLevel) return false;
         return true;
     }
 

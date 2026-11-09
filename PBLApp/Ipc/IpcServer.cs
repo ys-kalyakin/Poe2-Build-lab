@@ -151,6 +151,7 @@ public sealed class IpcServer
                 "/items/editor-save"             => await OnUi(EditorSave),
                 "/items/editor-create-new"       => await OnUi(() => EditorCreateNew(body)),
                 "/items/editor-set-quality"      => await OnUi(() => EditorSetQuality(body)),
+                "/items/editor-set-item-level"   => await OnUi(() => EditorSetItemLevel(body)),
                 "/items/editor-set-corrupted"    => await OnUi(() => EditorSetCorrupted(body)),
                 "/items/editor-set-rarity"       => await OnUi(() => EditorSetRarity(body)),
                 "/items/editor-set-base"         => await OnUi(() => EditorSetBase(body)),
@@ -1392,6 +1393,17 @@ public sealed class IpcServer
         return new { ok = true, quality = ed.Quality };
     }
 
+    /// <summary>Уровень предмета (item level) в редакторе: определяет, какие тиры
+    /// афиксов доступны (CanAddAffix гейтит e.Level > ItemLevel). Кламп 1..100.</summary>
+    private static object EditorSetItemLevel(string body)
+    {
+        if (GetEditor() is not { } ed) return new { error = "No editor open." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, int>>(body) ?? new();
+        if (!req.TryGetValue("level", out var l)) return new { error = "Missing 'level'." };
+        ed.ItemLevel = Math.Clamp(l, 1, 100);
+        return new { ok = true, itemLevel = ed.ItemLevel };
+    }
+
     private static object EditorSetCorrupted(string body)
     {
         if (GetEditor() is not { } ed) return new { error = "No editor open." };
@@ -1489,8 +1501,33 @@ public sealed class IpcServer
             a.Entry.AffixName.Contains(q, StringComparison.OrdinalIgnoreCase))
             ?? ed.FilteredAffixes.FirstOrDefault(a =>
             a.Entry.StatText.Contains(q, StringComparison.OrdinalIgnoreCase));
-        if (match is null) return new { error = $"No matching affix for '{q}'." };
-        if (!ed.CanAddAffix(match.Entry)) return new { error = "Cannot add this affix (capped/duplicated)." };
+        if (match is null)
+        {
+            // Афикс мог быть отфильтрован гейтом ilvl — дадим внятную причину.
+            var hidden = ed.AllAffixEntries.FirstOrDefault(a =>
+                    a.AffixName.Contains(q, StringComparison.OrdinalIgnoreCase))
+                ?? ed.AllAffixEntries.FirstOrDefault(a =>
+                    a.StatText.Contains(q, StringComparison.OrdinalIgnoreCase));
+            if (hidden is not null && hidden.Level > ed.ItemLevel)
+                return new
+                {
+                    error = $"Affix '{hidden.AffixName}' (tier level {hidden.Level}) requires " +
+                            $"item level ≥ {hidden.Level} (current {ed.ItemLevel}) — " +
+                            "call visual_editor_set_item_level.",
+                };
+            return new { error = $"No matching affix for '{q}'." };
+        }
+        if (!ed.CanAddAffix(match.Entry))
+        {
+            if (match.Entry.Level > ed.ItemLevel)
+                return new
+                {
+                    error = $"Affix '{match.Entry.AffixName}' (tier level {match.Entry.Level}) requires " +
+                            $"item level ≥ {match.Entry.Level} (current {ed.ItemLevel}) — " +
+                            "call visual_editor_set_item_level.",
+                };
+            return new { error = "Cannot add this affix (capped/duplicated)." };
+        }
         ed.AddAffix(match.Entry);
         return new { ok = true, added = match.Entry.AffixName, statText = match.Entry.StatText };
     }
