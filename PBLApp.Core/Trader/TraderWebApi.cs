@@ -18,6 +18,14 @@ public sealed class TraderWebApi
     private readonly Dictionary<string, (DateTime FetchedAt, IReadOnlyDictionary<string, double> Rates)> _ratesCache = [];
     private static readonly TimeSpan RatesTtl = TimeSpan.FromHours(1);
 
+    /// <summary>Exchange-типы poe.ninja для poe2 (doka /docs/api). Важно: во
+    /// множественном числе — «Fragment»/«Rune» ninja молча возвращает пустыми.</summary>
+    public static readonly IReadOnlyList<string> ExchangeTypes =
+    [
+        "Currency", "Fragments", "Abyss", "UncutGems", "LineageSupportGems", "Essences",
+        "SoulCores", "Idols", "Runes", "RitualOmens", "Expedition", "Delirium", "Breach", "Verisium",
+    ];
+
     public TraderWebApi(HttpMessageHandler? handler = null)
     {
         _http = handler is null
@@ -51,16 +59,24 @@ public sealed class TraderWebApi
 
     /// <summary>Курсы валют лиги в дивинах: id → primaryValue
     /// (форма ответа — как в TradeQuery:PriceBuilderProcessPoENinjaResponse).</summary>
-    public async Task<IReadOnlyDictionary<string, double>> GetCurrencyRatesAsync(
+    public Task<IReadOnlyDictionary<string, double>> GetCurrencyRatesAsync(
         string league, CancellationToken ct = default)
+        => GetExchangeRatesAsync(league, "Currency", ct);
+
+    /// <summary>Курсы exchange-типа ninja (ExchangeTypes) лиги в дивинах:
+    /// id → primaryValue. Кэш на час на пару (league, type).</summary>
+    public async Task<IReadOnlyDictionary<string, double>> GetExchangeRatesAsync(
+        string league, string type, CancellationToken ct = default)
     {
-        if (_ratesCache.TryGetValue(league, out var cached) &&
+        var key = $"{league}|{type}";
+        if (_ratesCache.TryGetValue(key, out var cached) &&
             DateTime.UtcNow - cached.FetchedAt < RatesTtl)
             return cached.Rates;
 
         var json = await _http.GetStringAsync(
-            "https://poe.ninja/poe2/api/economy/exchange/current/overview?type=Currency&league="
-                + Uri.EscapeDataString(league), ct);
+            "https://poe.ninja/poe2/api/economy/exchange/current/overview?type="
+                + Uri.EscapeDataString(type)
+                + "&league=" + Uri.EscapeDataString(league), ct);
         using var doc = JsonDocument.Parse(json);
         var rates = new Dictionary<string, double>();
         if (doc.RootElement.TryGetProperty("lines", out var lines) &&
@@ -76,7 +92,7 @@ public sealed class TraderWebApi
                 }
             }
         }
-        _ratesCache[league] = (DateTime.UtcNow, rates);
+        _ratesCache[key] = (DateTime.UtcNow, rates);
         return rates;
     }
 }
