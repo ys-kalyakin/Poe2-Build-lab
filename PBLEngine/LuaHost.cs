@@ -864,6 +864,92 @@ public sealed partial class LuaHost : IDisposable
         return lines;
     }
 
+    /// <summary>Полный каталог гемов data.gems одним проходом (активы и саппорты):
+    /// имя, теги, требования, naturalMaxLevel, мана-кост на максимуме — источник
+    /// правды для MCP-агента перед add_group/add_gem.</summary>
+    public List<GemCatalogEntry> GetGemCatalog()
+    {
+        var list = new List<GemCatalogEntry>();
+        var result = State.DoString(@"
+            if not (data and data.gems) then return nil end
+            local function weaponReqText(wr)
+                if not wr then return nil end
+                if type(wr) == 'string' then return wr end
+                if type(wr) == 'table' then
+                    local parts = {}
+                    for _, v in pairs(wr) do table.insert(parts, tostring(v)) end
+                    if #parts > 0 then return table.concat(parts, ', ') end
+                end
+                return nil
+            end
+            local out = {}
+            for _, gem in pairs(data.gems) do
+                local ge = gem.grantedEffect
+                local tags = {}
+                if gem.tags then
+                    for k, v in pairs(gem.tags) do
+                        if v then table.insert(tags, k) end
+                    end
+                end
+                table.sort(tags)
+                local mana = nil
+                if ge and ge.levels and #ge.levels > 0 then
+                    local lv = gem.naturalMaxLevel or #ge.levels
+                    if lv < 1 then lv = 1 end
+                    if lv > #ge.levels then lv = #ge.levels end
+                    local gel = ge.levels[lv]
+                    if gel and gel.cost and gel.cost.Mana then mana = gel.cost.Mana end
+                end
+                table.insert(out, {
+                    name        = gem.name or '',
+                    baseType    = gem.baseTypeName or '',
+                    support     = (ge and ge.support) or false,
+                    tags        = tags,
+                    tagString   = gem.tagString or '',
+                    gemType     = gem.gemType or '',
+                    reqStr      = gem.reqStr or 0,
+                    reqDex      = gem.reqDex or 0,
+                    reqInt      = gem.reqInt or 0,
+                    naturalMax  = gem.naturalMaxLevel or 0,
+                    tier        = gem.Tier or 0,
+                    weaponReq   = weaponReqText(gem.weaponRequirements),
+                    manaCost    = mana,
+                    description = ge and ge.description or nil,
+                })
+            end
+            table.sort(out, function(a, b) return a.name < b.name end)
+            return out
+        ");
+        if (result is { Length: > 0 } && result[0] is NLua.LuaTable tbl)
+        {
+            foreach (var k in tbl.Keys)
+            {
+                if (tbl[k] is not NLua.LuaTable g) continue;
+                var tags = new List<string>();
+                if (g["tags"] is NLua.LuaTable tt)
+                    foreach (var tk in tt.Keys)
+                        if (tt[tk] is string s) tags.Add(s);
+                list.Add(new GemCatalogEntry(
+                    Name:            g["name"] as string ?? "",
+                    BaseTypeName:    g["baseType"] as string ?? "",
+                    Support:         g["support"] is bool b && b,
+                    Tags:            tags,
+                    TagString:       g["tagString"] as string ?? "",
+                    GemType:         g["gemType"] as string ?? "",
+                    ReqStr:          g["reqStr"] is long rs ? (int)rs : 0,
+                    ReqDex:          g["reqDex"] is long rd ? (int)rd : 0,
+                    ReqInt:          g["reqInt"] is long ri ? (int)ri : 0,
+                    NaturalMaxLevel: g["naturalMax"] is long nm ? (int)nm : 0,
+                    Tier:            g["tier"] is long t ? (int)t : 0,
+                    WeaponRequirements: g["weaponReq"] as string,
+                    ManaCost:        g["manaCost"] is double mc ? mc : g["manaCost"] is long mcl ? mcl : 0,
+                    Description:     g["description"] as string
+                ));
+            }
+        }
+        return list;
+    }
+
     public Dictionary<string, string> GetGemColors()
     {
         var dict = new Dictionary<string, string>(StringComparer.Ordinal);

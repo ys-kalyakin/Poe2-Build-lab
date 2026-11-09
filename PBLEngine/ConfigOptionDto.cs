@@ -28,6 +28,26 @@ public record FullDpsSkillEntry(string Name, double Dps, int Count)
     public double Total => Dps * Count;
 }
 
+/// <summary>One gem from data.gems — каталог гемов самого приложения для MCP-агента:
+/// какие гемы существуют (активы/саппорты), их теги, требования, мана-кост —
+/// чтобы агент строил скил-сетапы по данным приложения, а не по памяти о PoE2.</summary>
+public record GemCatalogEntry(
+    string Name,
+    string BaseTypeName,
+    bool Support,
+    IReadOnlyList<string> Tags,
+    string TagString,
+    string GemType,
+    int ReqStr,
+    int ReqDex,
+    int ReqInt,
+    int NaturalMaxLevel,
+    int Tier,
+    string? WeaponRequirements,   // null / строка / список типов оружия через ", "
+    double ManaCost,              // на naturalMaxLevel; 0 если нет
+    string? Description
+);
+
 public record ActiveSkillEntry(int Index, string Name, bool IsTrigger = false);
 
 /// <summary>Passive-tree point budget, mirroring PoB's buildMode:EstimatePlayerProgress.
