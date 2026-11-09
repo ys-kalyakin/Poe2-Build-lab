@@ -95,4 +95,91 @@ public sealed class TraderWebApi
         _ratesCache[key] = (DateTime.UtcNow, rates);
         return rates;
     }
+
+    private readonly Dictionary<string, (DateTime FetchedAt, IReadOnlyList<UniquePriceEntry> Items)> _itemCache = [];
+
+    /// <summary>Stash-типы poe.ninja для poe2 (доки /docs/api): уники. Для poe2
+    /// формы со «s» — UniqueWeapons, не UniqueWeapon (как в poe1).</summary>
+    public static readonly IReadOnlyList<string> StashItemTypes =
+    [
+        "UniqueWeapons", "UniqueArmours", "UniqueAccessories", "UniqueFlasks",
+        "UniqueCharms", "UniqueJewels", "UniqueSanctumRelics", "UniqueTablets",
+        "PrecursorTablets",
+    ];
+
+    /// <summary>Цены уников stash-типа ninja лиги (DivineValue — в дивинах,
+    /// ListingCount — живых лотов). Кэш на час на (league, type), полный список;
+    /// query — регистронезависимый substring по name/baseType поверх кэша.</summary>
+    public async Task<IReadOnlyList<UniquePriceEntry>> GetUniquePricesAsync(
+        string league, string type, string? query = null, CancellationToken ct = default)
+    {
+        var key = $"{league}|{type}";
+        if (!_itemCache.TryGetValue(key, out var cached) ||
+            DateTime.UtcNow - cached.FetchedAt >= RatesTtl)
+        {
+            var json = await _http.GetStringAsync(
+                "https://poe.ninja/poe2/api/economy/stash/current/item/overview?type="
+                    + Uri.EscapeDataString(type)
+                    + "&league=" + Uri.EscapeDataString(league), ct);
+            cached = (DateTime.UtcNow, ParseUniquePrices(json));
+            _itemCache[key] = cached;
+        }
+
+        if (string.IsNullOrEmpty(query))
+            return cached.Items;
+        return cached.Items
+            .Where(i => i.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                        i.BaseName.Contains(query, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+    }
+
+    private static IReadOnlyList<UniquePriceEntry> ParseUniquePrices(string json)
+    {
+        var items = new List<UniquePriceEntry>();
+        using var doc = JsonDocument.Parse(json);
+        if (doc.RootElement.TryGetProperty("lines", out var lines) &&
+            lines.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var line in lines.EnumerateArray())
+            {
+                var name = line.TryGetProperty("name", out var n) ? n.GetString() : null;
+                if (string.IsNullOrEmpty(name)) continue;
+                var baseName = line.TryGetProperty("baseType", out var b) ? b.GetString() : "";
+                double divine = line.TryGetProperty("primaryValue", out var pv) &&
+                                pv.ValueKind == JsonValueKind.Number ? pv.GetDouble() : 0;
+                int listings = line.TryGetProperty("listingCount", out var lc) &&
+                               lc.ValueKind == JsonValueKind.Number ? lc.GetInt32() : 0;
+                bool corrupted = line.TryGetProperty("corrupted", out var c) &&
+                                 c.ValueKind == JsonValueKind.True;
+                string? detailsId = line.TryGetProperty("detailsId", out var d) ? d.GetString() : null;
+
+                var mods = new List<string>();
+                if (line.TryGetProperty("explicitModifiers", out var ems) &&
+                    ems.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var em in ems.EnumerateArray())
+                    {
+                        if (em.TryGetProperty("text", out var t) &&
+                            t.GetString() is { Length: > 0 } text)
+                            mods.Add(text);
+                    }
+                }
+
+                items.Add(new UniquePriceEntry(name!, baseName ?? "", divine, listings,
+                    corrupted, mods, detailsId));
+            }
+        }
+        return items;
+    }
 }
+
+/// <summary>Строка цены уника из poe.ninja (stash item overview): цена в дивинах,
+/// число живых лотов и текст модов.</summary>
+public sealed record UniquePriceEntry(
+    string Name,
+    string BaseName,
+    double DivineValue,
+    int ListingCount,
+    bool Corrupted,
+    IReadOnlyList<string> Mods,
+    string? DetailsId);
