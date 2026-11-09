@@ -461,38 +461,13 @@ public partial class TreeTabViewModel : ViewModelBase
     /// <summary>Shortest path (node ids) from the allocated tree to
     /// <paramref name="target"/> over node links — what <c>spec:AllocNode</c>
     /// will allocate. Empty when unreachable. Main-tree ↔ ascendancy boundary
-    /// is not crossed. Used to paint the allocation optimistically.</summary>
+    /// is not crossed. Used to paint the allocation optimistically.
+    /// The search itself lives in <see cref="TreePathFinder"/> (pure, unit-tested).
+    /// </summary>
     private List<int> PredictAllocPath(int target)
     {
         var byId = _nodeIndex ??= Nodes.ToDictionary(n => n.Id);
-        if (!byId.TryGetValue(target, out var tNode)) return [];
-        var alloc = AllocatedIds;
-        if (alloc.Count == 0 || alloc.Contains(target)) return [];
-
-        var visited = new HashSet<int>(alloc);
-        var parent  = new Dictionary<int, int>();
-        var queue   = new Queue<int>(alloc);
-        bool found  = false;
-        while (queue.Count > 0)
-        {
-            int cur = queue.Dequeue();
-            if (cur == target) { found = true; break; }
-            if (!byId.TryGetValue(cur, out var curNode)) continue;
-            bool curAsc = !string.IsNullOrEmpty(curNode.AscendancyName);
-            foreach (var lid in curNode.LinkedIds)
-            {
-                if (!visited.Add(lid)) continue;
-                if (!byId.TryGetValue(lid, out var lnode)) continue;
-                if (curAsc != !string.IsNullOrEmpty(lnode.AscendancyName)) continue;
-                parent[lid] = cur;
-                queue.Enqueue(lid);
-            }
-        }
-        if (!found) return [];
-        var path = new List<int> { target };
-        int n = target;
-        while (parent.TryGetValue(n, out var p)) { if (alloc.Contains(p)) break; path.Add(p); n = p; }
-        return path;
+        return TreePathFinder.FindPath(byId, AllocatedIds, target);
     }
 
     /// <summary>Runs the heavy <c>spec:AllocNode/DeallocNode</c> on a background
