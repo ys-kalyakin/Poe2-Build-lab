@@ -24,6 +24,10 @@ public partial class NotesTabViewModel : ViewModelBase
     /// <summary>Repoint at a new file path after the build was renamed.</summary>
     public void UpdateXmlPath(string xmlPath) => _xmlPath = xmlPath;
 
+    /// <summary>Agent/IPC hook: push the current notes text into the build model
+    /// so /build/save persists it (the UI Save button calls SaveAsync instead).</summary>
+    public void ApplyToBuild() => _build.Notes = Notes;
+
     [RelayCommand]
     private async Task SaveAsync()
     {

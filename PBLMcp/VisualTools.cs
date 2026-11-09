@@ -846,6 +846,51 @@ public class VisualTools
         catch (Exception ex) { return Error(ex); }
     }
 
+    // ── Stats / build persistence / notes ──────────────────────────────────
+
+    [McpServerTool]
+    [Description(
+        "Get stats of the open build in the running client. Pass keys='' for all ~600 " +
+        "stats, or a comma-separated list like 'TotalDPS,Life,EnergyShield'.")]
+    public async Task<string> VisualGetStats(
+        [Description("Comma-separated stat keys, or empty for all.")] string keys = "")
+    {
+        try { return await IpcClient.CallAsync("GET", "/stats?keys=" + Uri.EscapeDataString(keys)); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Save the open build to its XML file. Returns {ok, path}.")]
+    public async Task<string> VisualBuildSave()
+    {
+        try { return await IpcClient.CallAsync("POST", "/build/save", new { }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Return the full XML of the open build (for storing/branching builds). Large response.")]
+    public async Task<string> VisualBuildXml()
+    {
+        try { return await IpcClient.CallAsync("GET", "/build/xml"); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Read or write the build's Notes tab. Empty text = read; with text = write " +
+        "(persisted on visual_build_save). Use for recommendations the user can read.")]
+    public async Task<string> VisualNotes(
+        [Description("Notes text to write; empty to read current.")] string text = "")
+    {
+        try
+        {
+            return string.IsNullOrEmpty(text)
+                ? await IpcClient.CallAsync("GET", "/notes")
+                : await IpcClient.CallAsync("POST", "/notes", new { text });
+        }
+        catch (Exception ex) { return Error(ex); }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────
 
     private static string FindRepoRoot()

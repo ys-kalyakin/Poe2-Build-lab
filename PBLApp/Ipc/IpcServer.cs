@@ -201,6 +201,12 @@ public sealed class IpcServer
                 "/character-import/open" => await OnUi(() => CharacterImportOpen(body)),
                 "/export/open"           => await OnUi(() => ImportExportOpen(body)),
                 "/build/update-from-game" => await OnUi(UpdateFromGame),
+                "/stats"         => await OnUi(() => GetStatsFiltered(ctx.Request.Url?.Query ?? "")),
+                "/build/save"    => await OnUiAsync(BuildSave),
+                "/build/xml"     => await OnUi(BuildXml),
+                "/notes"         => ctx.Request.HttpMethod == "POST"
+                                        ? await OnUi(() => NotesSet(body))
+                                        : await OnUi(NotesGet),
                 "/app/screens"           => await OnUi(ListScreens),
                 "/app/move-to-screen"    => await OnUi(() => MoveToScreen(body)),
                 "/trader/state"      => await OnUi(TraderState),
@@ -1922,6 +1928,82 @@ public sealed class IpcServer
         if (GetMainVm()?.CurrentPage is not BuildPageViewModel bp)
             return new { error = "Not on the build page." };
         bp.UpdateFromGameCommand.Execute(null);
+        return new { ok = true };
+    }
+
+    // ── Stats / build persistence / notes (agent-facing) ───────────────────
+
+    private static BuildPageViewModel? BuildPageOrError(out object error)
+    {
+        error = null!;
+        var bp = GetMainVm()?.CurrentPage as BuildPageViewModel;
+        if (bp is null) error = new { error = "Not on BuildPage." };
+        return bp;
+    }
+
+    /// <summary>Full stat dump of the open build, optionally filtered:
+    /// GET /stats?keys=TotalDPS,Life — empty keys returns all (~600) stats.</summary>
+    private static object GetStatsFiltered(string query)
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.Build is not { } build) return new { error = "Build not loaded yet." };
+
+        var keys = new List<string>();
+        foreach (var part in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var kv = part.Split('=', 2);
+            if (kv.Length == 2 && kv[0] == "keys")
+                keys.AddRange(Uri.UnescapeDataString(kv[1])
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        }
+
+        var all = build.AllStats;
+        if (keys.Count == 0)
+            return all
+                .Where(kv => kv.Value is not null)
+                .OrderBy(kv => kv.Key)
+                .ToDictionary(kv => kv.Key, kv => kv.Value);
+
+        var result = new Dictionary<string, object?>();
+        foreach (var k in keys)
+        {
+            all.TryGetValue(k, out var v);
+            result[k] = v;
+        }
+        return result;
+    }
+
+    private static async Task<object> BuildSave()
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        await bp.SaveNow();
+        return new { ok = true, path = bp.XmlPath };
+    }
+
+    private static object BuildXml()
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.Build is not { } build) return new { error = "Build not loaded yet." };
+        var xml = build.SaveBuildToXml();
+        return xml is null ? new { error = "SaveBuildToXml returned null." } : new { ok = true, xml };
+    }
+
+    private static object NotesGet()
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.NotesTab is not { } t) return new { error = "NotesTab not ready." };
+        return new { ok = true, text = t.Notes };
+    }
+
+    private static object NotesSet(string body)
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.NotesTab is not { } t) return new { error = "NotesTab not ready." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, string>>(body) ?? new();
+        if (!req.TryGetValue("text", out var text))
+            return new { error = "Missing 'text'." };
+        t.Notes = text;
+        t.ApplyToBuild();   // so /build/save persists the agent-written notes
         return new { ok = true };
     }
 

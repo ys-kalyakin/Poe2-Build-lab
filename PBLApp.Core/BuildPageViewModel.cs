@@ -350,6 +350,13 @@ public partial class BuildPageViewModel : ViewModelBase
             await File.WriteAllTextAsync(_xmlPath, xml);
     }
 
+    /// <summary>Agent/IPC hook: persist the build to its XML file — the same
+    /// path the Save button drives.</summary>
+    public Task SaveNow() => SaveBuildAsync();
+
+    /// <summary>Current XML file path of the open build (for IPC responses).</summary>
+    public string XmlPath => _xmlPath;
+
     /// <summary>Persists the build silently — used for small UX choices like main-skill
     /// selection that should survive between sessions without forcing the user to click Save.</summary>
     private async Task AutoSaveAsync()
