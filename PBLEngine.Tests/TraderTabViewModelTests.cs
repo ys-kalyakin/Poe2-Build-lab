@@ -1,6 +1,10 @@
 using PBLApp.ViewModels;
 using PBLEngine;
 using System;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
@@ -120,5 +124,73 @@ public class TraderTabViewModelTests : IClassFixture<LuaHostFixture>
         win.Retarget("Helmet");
         Assert.Single(win.RequiredFilters);
         Assert.Equal(stat.Id, win.RequiredFilters[0].Id);
+    }
+
+    // Форма stash item overview ninja (как в TraderWebApiTests)
+    private const string StashJson =
+        """{"lines":[{"name":"Winter's Bite","baseType":"Glass Shank","primaryValue":1.25,"listingCount":7,"corrupted":false,"detailsId":"winters-bite-glass-shank","explicitModifiers":[{"text":"Adds (8-10) to (15-18) Cold Damage"}]},{"name":"Doom Fletch","baseType":"Blood Bow","primaryValue":0.4,"listingCount":22,"corrupted":true}]}""";
+
+    // Форма exchange overview ninja (как в TraderWebApiTests)
+    private const string NinjaJson =
+        """{"lines":[{"id":"exalted","primaryValue":0.005},{"id":"chaos","primaryValue":0.01},{"id":"mirror","primaryValue":400.0}]}""";
+
+    private static FakeHttpHandler MakePriceHandler() =>
+        new()
+        {
+            Responder = req => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    req.RequestUri!.ToString().Contains("/stash/") ? StashJson : NinjaJson,
+                    Encoding.UTF8, "application/json"),
+            },
+        };
+
+    [Fact(Timeout = 60_000)]
+    public async Task Session_PriceWrappers_UseSessionLeagueAndSkipNetworkWithoutLeague()
+    {
+        // выбранная лига персистится в настройки — сохраняем и возвращаем;
+        // стартово чистим: noLeague-сценарий не должен подхватить чужую лигу
+        var savedLeague = PBLApp.Core.AppPreferences.Get("TraderLeague");
+        PBLApp.Core.AppPreferences.Set("TraderLeague", "");
+        try
+        {
+            var fake = MakePriceHandler();
+            var session = new TraderSession(_host, new BuildModel(_host),
+                webApi: new PBLApp.Core.Trader.TraderWebApi(fake));
+            session.SelectedLeague = "Standard";
+            await Task.Delay(300); // фон конструктора (лиги/курсы) оседает — ответы fake мгновенны
+
+            var items = await session.GetUniquePricesAsync("UniqueWeapons");
+            Assert.Equal(2, items.Count);
+            Assert.Equal(1.25, items[0].DivineValue, 6);
+
+            var rates = await session.GetExchangeRatesAsync("Currency");
+            Assert.Equal(0.005, rates["exalted"], 6);
+
+            var stashBefore = fake.Requests.Count(r =>
+                r.RequestUri!.ToString().Contains("/stash/"));
+            var filtered = await session.GetUniquePricesAsync("UniqueWeapons", "glass");
+            Assert.Single(filtered);
+            Assert.Equal(stashBefore, fake.Requests.Count(r =>
+                r.RequestUri!.ToString().Contains("/stash/"))); // фильтр поверх кэша
+
+            // сессия без лиги: в ninja не ходим вообще. Pref чистим повторно:
+            // session1 выше персистил «Standard», а InitLeaguesAsync noLeague
+            // читает преф асинхронно и назначил бы её фоном
+            PBLApp.Core.AppPreferences.Set("TraderLeague", "");
+            var emptyFake = MakePriceHandler();
+            var noLeague = new TraderSession(_host, new BuildModel(_host),
+                webApi: new PBLApp.Core.Trader.TraderWebApi(emptyFake));
+            var none = await noLeague.GetUniquePricesAsync("UniqueWeapons");
+            Assert.Empty(none);
+            Assert.Empty(await noLeague.GetExchangeRatesAsync("Currency"));
+            Assert.DoesNotContain(emptyFake.Requests,
+                r => r.RequestUri!.ToString().Contains("poe.ninja"));
+        }
+        finally
+        {
+            if (savedLeague is null) PBLApp.Core.AppPreferences.Set("TraderLeague", "");
+            else PBLApp.Core.AppPreferences.Set("TraderLeague", savedLeague);
+        }
     }
 }
