@@ -1185,14 +1185,23 @@ public sealed partial class LuaHost : IDisposable
                     end
                 end
             end
-            -- предупреждения предметов/джевелов из движка
+            -- предупреждения предметов/джевелов из движка. В PoB itemWarnings —
+            -- вложенные таблицы (jewelLimitWarning/socketLimitWarning — массивы
+            -- строк, CalcSetup.lua:958/2127): отдаём строки предупреждений,
+            -- а не имена ключей.
             if env and env.itemWarnings then
                 for k, w in pairs(env.itemWarnings) do
-                    local msg = ''
-                    if type(w) == 'string' then msg = w
-                    elseif type(k) == 'string' then msg = k
-                    elseif w ~= nil then msg = tostring(w) end
-                    if msg ~= '' then addIssue('item', msg) end
+                    if type(w) == 'table' then
+                        for _, line in pairs(w) do
+                            if type(line) == 'string' and line ~= '' then
+                                addIssue('item', line)
+                            end
+                        end
+                    elseif type(w) == 'string' and w ~= '' then
+                        addIssue('item', w)
+                    elseif type(k) == 'string' then
+                        addIssue('item', k)
+                    end
                 end
             end
             -- отключённые активные скилы

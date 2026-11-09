@@ -979,23 +979,9 @@ public sealed class IpcServer
         if (SkillsVmOrError(out var err) is not { } v) return err;
         var req = JsonSerializer.Deserialize<Dictionary<string, string>>(body) ?? new();
         req.TryGetValue("gemName", out var gemName);
-        // Имя должно резолвиться в каталоге: иначе Lua молча создаст группу
-        // с битым гемом ("Unrecognised gem name" до IPC не доходит).
-        var host = ItemDataHost();
-        if (host is not null)
-        {
-            var (active, support) = host.GetAvailableGemNames();
-            var all = active.Concat(support).ToList();
-            var resolved = GemNameMatcher.FindExact(gemName ?? "", all);
-            if (resolved is null)
-                return new
-                {
-                    error = $"Unknown gem name '{gemName}'. Resolve names via /skills/gem-catalog.",
-                    suggestions = GemNameMatcher.Suggest(gemName ?? "", all),
-                };
-            gemName = resolved;
-        }
-        v.AddGroupFromPicker(gemName ?? "");
+        var (nameErr, resolved) = ResolveGemName(gemName);
+        if (nameErr is not null) return nameErr;
+        v.AddGroupFromPicker(resolved ?? "");
         return SkillsListing(v);
     }
 
@@ -1012,6 +998,26 @@ public sealed class IpcServer
         return SkillsListing(v);
     }
 
+    /// <summary>Резолв имени гема по каталогу: (null, resolved) при успехе,
+    /// (error, null) при промахе — с подсказками. Общий для add-group/add-gem/
+    /// set-gem: иначе Lua молча создаст битый гем ("Unrecognised gem name"
+    /// до IPC не доходит).</summary>
+    private static (object? Error, string? Resolved) ResolveGemName(string? gemName)
+    {
+        var host = ItemDataHost();
+        if (host is null) return (null, gemName);   // нет движка — пусть VM отработает как раньше
+        var (active, support) = host.GetAvailableGemNames();
+        var all = active.Concat(support).ToList();
+        var resolved = GemNameMatcher.FindExact(gemName ?? "", all);
+        return resolved is null
+            ? (new
+               {
+                   error = $"Unknown gem name '{gemName}'. Resolve names via /skills/gem-catalog.",
+                   suggestions = GemNameMatcher.Suggest(gemName ?? "", all),
+               }, null)
+            : (null, resolved);
+    }
+
     private static object SkillsAddGem(string body)
     {
         if (SkillsVmOrError(out var err) is not { } v) return err;
@@ -1023,12 +1029,15 @@ public sealed class IpcServer
             string.IsNullOrWhiteSpace(ne.GetString()))
             return new { error = "Missing 'gemName'." };
 
+        var (nameErr, resolved) = ResolveGemName(ne.GetString());
+        if (nameErr is not null) return nameErr;
+
         v.AddGem(grp.Index);
         var fresh = v.Groups.First(g => g.Index == grp.Index);
         int newIdx = new[] { fresh.ActiveGem }.Concat(fresh.SupportSlots)
             .Where(x => x is { GemIndex: > 0 })
             .Max(x => x!.GemIndex);
-        v.CommitGemName(grp.Index, newIdx, ne.GetString()!);
+        v.CommitGemName(grp.Index, newIdx, resolved!);
         return SkillsListing(v);
     }
 
@@ -1058,7 +1067,11 @@ public sealed class IpcServer
         int gem = gme.GetInt32();
 
         if (req.TryGetValue("name", out var ne) && ne.ValueKind == JsonValueKind.String)
-            v.CommitGemName(grp.Index, gem, ne.GetString() ?? "");
+        {
+            var (nameErr, resolved) = ResolveGemName(ne.GetString());
+            if (nameErr is not null) return nameErr;
+            v.CommitGemName(grp.Index, gem, resolved ?? "");
+        }
         if (req.TryGetValue("level", out var le) && le.ValueKind == JsonValueKind.Number)
             v.SyncGemLevel(grp.Index, gem, le.GetInt32());
         if (req.TryGetValue("quality", out var qe) && qe.ValueKind == JsonValueKind.Number)
@@ -2463,9 +2476,7 @@ public sealed class IpcServer
                                  "For share codes pass them as 'code'." };
 
         build.LoadBuildFromXml(xml, string.IsNullOrWhiteSpace(name) ? "Imported Build" : name);
-        bp.CalcsTab?.Refresh();
-        bp.SkillsTab?.Refresh();
-        bp.ItemsTab?.Refresh();
+        bp.RefreshAfterImport();   // включая TreeTab — иначе /tree/allocated вернёт прежнее дерево
         ClearStatSnapshots();   // снапшоты принадлежали прежнему билду
         if (save)
             await bp.SaveNow();

@@ -31,4 +31,26 @@ public class BuildValidationTests : IClassFixture<LuaHostFixture>
         Assert.NotEmpty(attrs);
         Assert.All(attrs, i => Assert.False(string.IsNullOrWhiteSpace(i.Message)));
     }
+
+    [Fact]
+    public void ItemWarnings_NestedTables_SurfaceTheirStringsNotKeys()
+    {
+        // В PoB itemWarnings — вложенные таблицы (jewelLimitWarning/socketLimitWarning
+        // — массивы строк, CalcSetup.lua:958/2127). Валидация должна отдавать строки
+        // предупреждений, а не имена ключей вроде "socketLimitWarning".
+        _host.RecalcStats();
+        _host.State.DoString(@"
+            if build and build.calcsTab and build.calcsTab.mainEnv then
+                build.calcsTab.mainEnv.itemWarnings = {
+                    socketLimitWarning = { 'Jewel radius exceeded for Test Jewel' },
+                    plain = 'plain warning',
+                }
+            end
+        ");
+        var v = _host.GetBuildValidation();
+        Assert.Contains(v.Issues, i => i.Code == "item" && i.Message.Contains("Jewel radius exceeded"));
+        Assert.Contains(v.Issues, i => i.Code == "item" && i.Message == "plain warning");
+        Assert.DoesNotContain(v.Issues, i => i.Code == "item" && i.Message == "socketLimitWarning");
+        _host.State.DoString("if build and build.calcsTab and build.calcsTab.mainEnv then build.calcsTab.mainEnv.itemWarnings = {} end");
+    }
 }

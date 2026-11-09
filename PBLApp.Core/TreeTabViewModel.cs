@@ -476,37 +476,48 @@ public partial class TreeTabViewModel : ViewModelBase
     /// <paramref name="attributeIndex"/> (1=Str, 2=Dex, 3=Int) routes an
     /// attribute node through <see cref="LuaHost.AllocAttributeNode"/> instead
     /// of the dialog callback — the agent/IPC path never opens dialogs.</summary>
-    private async Task RunBackgroundToggle(int nodeId, bool allocate, int? attributeIndex = null)
+    private async Task RunBackgroundToggle(int nodeId, bool allocate, int? attributeIndex = null, int weaponSet = 0)
     {
         await _luaQueue.WaitAsync();
         try
         {
             // IsToggleBusy stays true for the whole burst (set on enqueue, cleared
             // when the queue drains) so the spinner doesn't flicker between ops.
-            await Task.Run(() =>
+            // allocMode — амбиентное состояние Lua-сессии: ставим/снимаем ВНУТРИ
+            // секции семафора, иначе конкурентный тоггл поймает чужой режим и
+            // узел молча попадёт не в тот пул очков.
+            if (weaponSet > 0) _host.SetAllocMode(weaponSet);
+            try
             {
-                if (allocate)
+                await Task.Run(() =>
                 {
-                    if (attributeIndex is { } idx) _host.AllocAttributeNode(nodeId, idx);
-                    else                           _host.AllocNode(nodeId, deferRecalc: true);
-                }
-                else
-                {
-                    _host.DeallocNode(nodeId, deferRecalc: true);
-                }
-            });
+                    if (allocate)
+                    {
+                        if (attributeIndex is { } idx) _host.AllocAttributeNode(nodeId, idx);
+                        else                           _host.AllocNode(nodeId, deferRecalc: true);
+                    }
+                    else
+                    {
+                        _host.DeallocNode(nodeId, deferRecalc: true);
+                    }
+                });
 
-            // Only the last toggle of a burst pays the stats recalc + reconcile.
-            bool last = Volatile.Read(ref _pendingToggles) <= 1;
-            if (last)
+                // Only the last toggle of a burst pays the stats recalc + reconcile.
+                bool last = Volatile.Read(ref _pendingToggles) <= 1;
+                if (last)
+                {
+                    await Task.Run(() => _host.RecalcStats());
+
+                    // Back on the UI thread, semaphore still held → no concurrent Lua.
+                    RefreshAllocated();
+                    RefreshPointUsage();
+                    _onStatsChanged?.Invoke();
+                    MarkPowerStale();
+                }
+            }
+            finally
             {
-                await Task.Run(() => _host.RecalcStats());
-
-                // Back on the UI thread, semaphore still held → no concurrent Lua.
-                RefreshAllocated();
-                RefreshPointUsage();
-                _onStatsChanged?.Invoke();
-                MarkPowerStale();
+                if (weaponSet > 0) _host.SetAllocMode(0);
             }
         }
         catch { /* best-effort; reconcile below restores truth */ }
@@ -616,7 +627,7 @@ public partial class TreeTabViewModel : ViewModelBase
 
                 Interlocked.Increment(ref _pendingToggles);
                 IsToggleBusy = true;
-                await RunBackgroundToggle(id, allocate: true, idx);
+                await RunBackgroundToggle(id, allocate: true, idx, weaponSet);
             }
 
             await WaitForEngineSettledAsync();
@@ -669,7 +680,7 @@ public partial class TreeTabViewModel : ViewModelBase
         {
             Interlocked.Increment(ref _pendingToggles);
             IsToggleBusy = true;
-            await RunBackgroundToggle(nodeId, allocate: false);
+            await RunBackgroundToggle(nodeId, allocate: false, weaponSet: weaponSet);
         }
         finally
         {
