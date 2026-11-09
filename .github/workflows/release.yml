@@ -212,7 +212,8 @@ jobs:
         run: |
           version=$(grep -oPm1 '(?<=<Version>)[0-9.]+' PBLApp/PBLApp.csproj)
           game=$(sed -nE 's/^game_version:[[:space:]]*([0-9.]+).*/\1/p' .upstream-sync.yaml)
-          tag="${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', version) }}"
+          tag="${{ github.ref_type == 'tag' && github.ref_name || '' }}"
+          if [ -z "$tag" ]; then tag="v$version"; fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "game=$game"       >> "$GITHUB_OUTPUT"
           echo "tag=$tag"         >> "$GITHUB_OUTPUT"
