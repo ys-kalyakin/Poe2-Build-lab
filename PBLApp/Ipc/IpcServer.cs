@@ -217,6 +217,8 @@ public sealed class IpcServer
                 "/trader/state"      => await OnUi(TraderState),
                 "/trader/open"       => await OnUi(() => TraderOpen(body)),
                 "/trader/search"     => await OnUi(() => TraderSearch(body)),
+                "/prices/currency"   => await OnUiAsync(() => PricesCurrency(body)),
+                "/prices/uniques"    => await OnUiAsync(() => PricesUniques(body)),
                 "/trader/set-league" => await OnUi(() => TraderSetLeague(body)),
                 _ => new { error = $"Unknown endpoint: {path}" }
             };
@@ -1958,6 +1960,60 @@ public sealed class IpcServer
                 @base = u.BaseName,
                 category = u.Category,
                 lookupKey = u.LookupKey,
+            }).ToArray(),
+        };
+    }
+
+    // ── Цены для агента (ninja через сессию трейдера) ────────────────────────
+
+    private static (TraderSession?, object?) PriceSession()
+    {
+        var s = GetTraderSession();
+        return s is null
+            ? (null, (object)new { error = "Trader session not created. Open a build page first." })
+            : (s, null);
+    }
+
+    private static async Task<object> PricesCurrency(string body)
+    {
+        var (s, err) = PriceSession();
+        if (s is null) return err!;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        var type = req.TryGetValue("type", out var t) && t.GetString() is { Length: > 0 } ty ? ty : "Currency";
+        if (!PBLApp.Core.Trader.TraderWebApi.ExchangeTypes.Contains(type))
+            return new { error = $"Unknown exchange type '{type}'. Allowed: {string.Join(", ", PBLApp.Core.Trader.TraderWebApi.ExchangeTypes)}." };
+        var query = req.TryGetValue("query", out var qe) && qe.ValueKind == JsonValueKind.String ? qe.GetString() : null;
+
+        var rates = await s.GetExchangeRatesAsync(type);
+        var list = rates.Select(kv => new { name = kv.Key, value = kv.Value });
+        if (!string.IsNullOrEmpty(query))
+            list = list.Where(r => r.name.Contains(query, StringComparison.OrdinalIgnoreCase));
+        return new { league = s.SelectedLeague, type, rates = list.ToArray() };
+    }
+
+    private static async Task<object> PricesUniques(string body)
+    {
+        var (s, err) = PriceSession();
+        if (s is null) return err!;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        var type = req.TryGetValue("type", out var t) && t.GetString() is { Length: > 0 } ty ? ty : "UniqueArmours";
+        if (!PBLApp.Core.Trader.TraderWebApi.StashItemTypes.Contains(type))
+            return new { error = $"Unknown stash type '{type}'. Allowed: {string.Join(", ", PBLApp.Core.Trader.TraderWebApi.StashItemTypes)}." };
+        var query = req.TryGetValue("query", out var qe) && qe.ValueKind == JsonValueKind.String ? qe.GetString() : null;
+
+        var items = await s.GetUniquePricesAsync(type, query);
+        return new
+        {
+            league = s.SelectedLeague,
+            type,
+            items = items.Select(i => new
+            {
+                name = i.Name,
+                @base = i.BaseName,
+                price = i.DivineValue,
+                listingCount = i.ListingCount,
+                corrupted = i.Corrupted,
+                mods = i.Mods,
             }).ToArray(),
         };
     }
