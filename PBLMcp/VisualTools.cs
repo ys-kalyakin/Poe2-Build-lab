@@ -36,17 +36,27 @@ public class VisualTools
             }
 
             // Find the PBLApp executable. Prefer freshly-built Debug binary.
+            // Windows: PBLApp.exe; Linux/macOS: the apphost "PBLApp" (no
+            // extension) or fall back to `dotnet PBLApp.dll`.
             var repoRoot = FindRepoRoot();
-            var exe = Path.Combine(repoRoot, "PBLApp", "bin", "Debug", "net9.0", "PBLApp.exe");
-            if (!File.Exists(exe))
-                return Error($"PBLApp.exe not found at {exe}. Build the project first (dotnet build PBLApp/PBLApp.csproj).");
+            var binDir   = Path.Combine(repoRoot, "PBLApp", "bin", "Debug", "net9.0");
+            var exe      = Path.Combine(binDir, "PBLApp.exe");
+            var apphost  = Path.Combine(binDir, "PBLApp");
+            var dll      = Path.Combine(binDir, "PBLApp.dll");
 
-            var psi = new ProcessStartInfo(exe, "--enable-ipc")
-            {
-                UseShellExecute  = false,
-                WorkingDirectory = repoRoot,
-                CreateNoWindow   = false,
-            };
+            ProcessStartInfo psi;
+            if (File.Exists(exe))
+                psi = new ProcessStartInfo(exe, "--enable-ipc");
+            else if (File.Exists(apphost) && !OperatingSystem.IsWindows())
+                psi = new ProcessStartInfo(apphost, "--enable-ipc");
+            else if (File.Exists(dll))
+                psi = new ProcessStartInfo("dotnet", $"\"{dll}\" --enable-ipc");
+            else
+                return Error($"PBLApp build not found in {binDir}. Build the project first (dotnet build PBLApp/PBLApp.csproj).");
+
+            psi.UseShellExecute  = false;
+            psi.WorkingDirectory = repoRoot;
+            psi.CreateNoWindow   = false;
             var proc = Process.Start(psi)
                        ?? throw new InvalidOperationException("Process.Start returned null.");
 
