@@ -212,6 +212,7 @@ public sealed class IpcServer
                 "/stats/diff"     => await OnUi(() => StatsDiffHandler(ctx.Request.Url?.Query ?? "")),
                 "/build/save"    => await OnUiAsync(BuildSave),
                 "/build/xml"     => await OnUi(BuildXml),
+                "/build/validate" => await OnUi(BuildValidate),
                 "/notes"         => ctx.Request.HttpMethod == "POST"
                                         ? await OnUi(() => NotesSet(body))
                                         : await OnUi(NotesGet),
@@ -2352,6 +2353,23 @@ public sealed class IpcServer
         if (bp.Build is not { } build) return new { error = "Build not loaded yet." };
         var xml = build.SaveBuildToXml();
         return xml is null ? new { error = "SaveBuildToXml returned null." } : new { ok = true, xml };
+    }
+
+    /// <summary>Свод предупреждений билда: несходящиеся атрибуты, отрицательные
+    /// пулы, cost-предупреждения, itemWarnings, отключённые скилы, бюджет очков.
+    /// Запускать после мутаций шмота/дерева — иначе агент не узнает, что сломал.</summary>
+    private static object BuildValidate()
+    {
+        var host = ItemDataHost();
+        if (host is null) return new { error = "No build page open or engine not ready." };
+        var v = host.GetBuildValidation();
+        return new
+        {
+            ok             = true,
+            points         = PointsPayload(v.Points),
+            warnings       = v.Issues.Select(i => new { code = i.Code, message = i.Message, source = i.Source }).ToArray(),
+            disabledSkills = v.DisabledSkills.Select(d => new { group = d.GroupIndex, gem = d.GemName, reason = d.Reason }).ToArray(),
+        };
     }
 
     private static object NotesGet()

@@ -120,6 +120,11 @@ dotnet build PBLMcp/PBLMcp.csproj -c Release
 `visual_get_stats` — все ~600 статов или фильтр `keys=TotalDPS,Life,…` ·
 `visual_stats_snapshot` / `visual_stats_diff` — снапшот статов и diff до/после
 (снапшоты стираются при открытии/импорте другого билда) ·
+`visual_build_validate` — свод предупреждений: несходящиеся атрибуты,
+отрицательные пулы, нехватка пула на скилы, itemWarnings движка, отключённые
+скилы (например «weapon is not usable with this skill»), перерасход очков
+дерева/асцензии/weapon set. Запускай после мутаций шмота/дерева/гемов — UI
+ничего не блокирует, предупреждения видны только здесь ·
 `visual_config_state` / `visual_config_set` — настройки боя (враг, заряды,
 баффы — влияют на цифры) · `visual_build_save` — сохранить XML билда ·
 `visual_build_xml` — выгрузить XML наружу · `visual_notes` — читать/писать
@@ -170,6 +175,13 @@ MVVM-драйвер для тестов.
    `overBudget`
 3. `visual_get_stats` — эффект; откат — `visual_tree_deallocate_node`
    (с конца пути).
+
+**После мутаций — проверь билд**
+1. После смены шмота/дерева/гемов: `visual_build_validate`.
+2. `warnings` с кодами `attrs`/`pool`/`cost`/`item`/`points` — почини
+   (атрибуты — атрибутивными узлами дерева или шмотом, очки — деаллокация).
+3. `disabledSkills` — скил не работает (чаще всего оружие не подходит) —
+   смена базы оружия или гема.
 
 **Собрать скил-сетап**
 1. `visual_skills_add_group {gemName}` → индекс из листинга

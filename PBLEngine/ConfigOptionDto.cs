@@ -128,6 +128,24 @@ public record AffixEntry(
     int    TierCount = 0
 );
 
+/// <summary>Одна строка предупреждения /build/validate. Коды стабильны:
+/// attrs (требования атрибутов), pool (отрицательный незарезервированный пул),
+/// cost (не хватает пула на скил), item (предупреждения предметов движка),
+/// points (перерасход очков дерева).</summary>
+public record ValidationIssue(string Code, string Message, string? Source = null);
+
+/// <summary>Активный скил, отключённый движком (напр. «Main Hand weapon is not
+/// usable with this skill») — skillFlags.disable + disableReason.</summary>
+public record DisabledSkillEntry(int GroupIndex, string GemName, string Reason);
+
+/// <summary>Свод валидации билда: бюджет очков, список предупреждений,
+/// отключённые скилы. Ничего не пересчитывает — читает посчитанное
+/// mainEnv/mainOutput.</summary>
+public record BuildValidation(
+    PointUsage Points,
+    List<ValidationIssue> Issues,
+    List<DisabledSkillEntry> DisabledSkills);
+
 public record UniqueItemEntry(
     string Name,
     string BaseName,

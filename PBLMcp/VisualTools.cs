@@ -875,6 +875,19 @@ public class VisualTools
     }
 
     [McpServerTool]
+    [Description(
+        "Validate the current build: unmet attribute requirements, negative unreserved " +
+        "Life/Mana/Spirit, skills the pool can't afford, engine item warnings (jewels, " +
+        "sockets), disabled skills (e.g. weapon-usable mismatch) and passive/ascendancy/" +
+        "weapon-set point budget. Run AFTER gear/tree/gem mutations — warnings only show " +
+        "here, the app UI does not block anything.")]
+    public async Task<string> VisualBuildValidate()
+    {
+        try { return await IpcClient.CallAsync("GET", "/build/validate"); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
     [Description("Snapshot current stats (build.AllStats) under a name (default 'last'). " +
         "Call before a tryout (equip an item, allocate nodes), change something, then " +
         "visual_stats_diff — much cheaper than comparing full stat dumps by hand. " +

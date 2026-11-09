@@ -1124,6 +1124,141 @@ public sealed partial class LuaHost : IDisposable
         return null;
     }
 
+    /// <summary>Свод предупреждений билда из уже посчитанного mainEnv/mainOutput:
+    /// несходящиеся атрибуты (Req* > *), отрицательные незарезервированные пулы,
+    /// cost-предупреждения скилов, itemWarnings движка, отключённые скилы
+    /// (skillFlags.disable). Бюджет очков — из GetPointUsage, перерасход
+    /// превращается в issue 'points' на стороне C#.</summary>
+    public BuildValidation GetBuildValidation()
+    {
+        var result = State.DoString(@"
+            if not (build and build.calcsTab) then return nil end
+            local out  = build.calcsTab.mainOutput
+            local env  = build.calcsTab.mainEnv
+            local issues = {}
+            local function addIssue(code, msg, src)
+                table.insert(issues, {code = code, message = tostring(msg), source = src})
+            end
+            if out then
+                -- требования атрибутов: ReqStr/ReqDex/ReqInt vs Str/Dex/Int
+                local attrs = {
+                    {'Str', 'Strength'},
+                    {'Dex', 'Dexterity'},
+                    {'Int', 'Intelligence'},
+                }
+                for _, a in ipairs(attrs) do
+                    local req  = out['Req' .. a[1]]
+                    local have = out[a[1]]
+                    if type(req) == 'number' and type(have) == 'number' and req > have then
+                        local src
+                        local reqItem = out['Req' .. a[1] .. 'Item']
+                        if type(reqItem) == 'table' and reqItem.source then
+                            src = tostring(reqItem.source)
+                        end
+                        addIssue('attrs', string.format(
+                            'You do not meet the %s requirement: need %d, have %d', a[2], req, have), src)
+                    end
+                end
+                -- отрицательные незарезервированные пулы
+                local pools = {
+                    {'LifeUnreserved', 'Life'},
+                    {'ManaUnreserved', 'Mana'},
+                    {'SpiritUnreserved', 'Spirit'},
+                }
+                for _, p in ipairs(pools) do
+                    local v = out[p[1]]
+                    if type(v) == 'number' and v < 0 then
+                        addIssue('pool', string.format('Your unreserved %s is negative (%d)', p[2], v))
+                    end
+                end
+                -- не хватает пула на скил (скалярные warning-флаги Calcs)
+                local costs = {
+                    {'LifeCostWarning', 'Life'},
+                    {'ManaCostWarning', 'Mana'},
+                    {'RageCostWarning', 'Rage'},
+                    {'ESCostWarning', 'Energy Shield'},
+                }
+                for _, c in ipairs(costs) do
+                    if out[c[1]] == true then
+                        addIssue('cost', string.format('Not enough %s pool for some skills', c[2]))
+                    end
+                end
+            end
+            -- предупреждения предметов/джевелов из движка
+            if env and env.itemWarnings then
+                for k, w in pairs(env.itemWarnings) do
+                    local msg = ''
+                    if type(w) == 'string' then msg = w
+                    elseif type(k) == 'string' then msg = k
+                    elseif w ~= nil then msg = tostring(w) end
+                    if msg ~= '' then addIssue('item', msg) end
+                end
+            end
+            -- отключённые активные скилы
+            local disabled = {}
+            if env and env.player and env.player.activeSkillList then
+                for _, skill in pairs(env.player.activeSkillList) do
+                    local flags = skill.skillFlags
+                    if flags and flags.disable and flags.disableReason then
+                        local gi = 0
+                        if build.skillsTab and skill.socketGroup then
+                            for idx, grp in ipairs(build.skillsTab.socketGroupList) do
+                                if grp == skill.socketGroup then gi = idx; break end
+                            end
+                        end
+                        local nm = skill.name
+                        if (not nm or nm == '') and skill.activeEffect and skill.activeEffect.grantedEffect then
+                            nm = skill.activeEffect.grantedEffect.name
+                        end
+                        table.insert(disabled, {
+                            groupIndex = gi,
+                            gemName    = tostring(nm or '?'),
+                            reason     = tostring(flags.disableReason),
+                        })
+                    end
+                end
+            end
+            return { issues = issues, disabled = disabled }
+        ");
+        var issues = new List<ValidationIssue>();
+        var disabled = new List<DisabledSkillEntry>();
+        if (result is { Length: > 0 } && result[0] is LuaTable tbl)
+        {
+            if (tbl["issues"] is LuaTable it)
+                foreach (var k in it.Keys)
+                {
+                    if (it[k] is not LuaTable row) continue;
+                    issues.Add(new ValidationIssue(
+                        Code:    row["code"] as string ?? "",
+                        Message: row["message"] as string ?? "",
+                        Source:  row["source"] as string));
+                }
+            if (tbl["disabled"] is LuaTable dt)
+                foreach (var k in dt.Keys)
+                {
+                    if (dt[k] is not LuaTable row) continue;
+                    disabled.Add(new DisabledSkillEntry(
+                        GroupIndex: row["groupIndex"] is { } gi ? Convert.ToInt32(gi) : 0,
+                        GemName:    row["gemName"] as string ?? "?",
+                        Reason:     row["reason"] as string ?? ""));
+                }
+        }
+        var points = GetPointUsage() ?? new PointUsage(0, 0, 0, 8, 0, 0, 0, 0);
+        if (points.PassivesUsed > points.PassivesMax)
+            issues.Add(new ValidationIssue("points",
+                $"Too many passive points: {points.PassivesUsed}/{points.PassivesMax}"));
+        if (points.AscendancyUsed > points.AscendancyMax)
+            issues.Add(new ValidationIssue("points",
+                $"Too many ascendancy points: {points.AscendancyUsed}/{points.AscendancyMax}"));
+        if (points.WeaponSet1Used > points.WeaponSetMax)
+            issues.Add(new ValidationIssue("points",
+                $"Too many weapon set 1 points: {points.WeaponSet1Used}/{points.WeaponSetMax}"));
+        if (points.WeaponSet2Used > points.WeaponSetMax)
+            issues.Add(new ValidationIssue("points",
+                $"Too many weapon set 2 points: {points.WeaponSet2Used}/{points.WeaponSetMax}"));
+        return new BuildValidation(points, issues, disabled);
+    }
+
     public Dictionary<string, object?> GetAllStats()
     {
         var dict = new Dictionary<string, object?>(StringComparer.Ordinal);
