@@ -187,6 +187,8 @@ public sealed class IpcServer
                 "/tree/nodes"             => await OnUi(() => TreeNodes(body)),
                 "/skills/tooltips"        => await OnUi(SkillsTooltips),
                 "/skills/list"            => await OnUi(SkillsList),
+                "/skills/gem-catalog"     => await OnUi(() => GemCatalog(body)),
+                "/skills/gem-tooltip"     => await OnUi(() => GemTooltip(body)),
                 "/skills/add-group"       => await OnUi(() => SkillsAddGroup(body)),
                 "/skills/remove-group"    => await OnUi(() => SkillsRemoveGroup(body)),
                 "/skills/add-gem"         => await OnUi(() => SkillsAddGem(body)),
@@ -825,11 +827,109 @@ public sealed class IpcServer
         return SkillsListing(v);
     }
 
+    // Каталог гемов статичен в рамках версии данных — кэшируем на процесс.
+    private static List<GemCatalogEntry>? _gemCatalogCache;
+
+    private static object GemCatalog(string body)
+    {
+        var host = ItemDataHost();
+        if (host is null) return new { error = "No build page open or engine not ready." };
+        _gemCatalogCache ??= host.GetGemCatalog();
+        var catalog = _gemCatalogCache;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        string? Param(string key) =>
+            req.TryGetValue(key, out var e) && e.ValueKind == JsonValueKind.String ? e.GetString() : null;
+        var query = Param("query");
+        var type  = Param("type");
+        var tag   = Param("tag");
+        var weapon = Param("weapon");
+        IEnumerable<GemCatalogEntry> items = catalog;
+        if (!string.IsNullOrEmpty(query))
+            items = items.Where(g =>
+                g.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                g.TagString.Contains(query, StringComparison.OrdinalIgnoreCase));
+        if (!string.IsNullOrEmpty(type))
+        {
+            if (type.Equals("active", StringComparison.OrdinalIgnoreCase))
+                items = items.Where(g => !g.Support);
+            else if (type.Equals("support", StringComparison.OrdinalIgnoreCase))
+                items = items.Where(g => g.Support);
+            else
+                return new { error = $"Unknown type '{type}'. Allowed: active, support." };
+        }
+        if (!string.IsNullOrEmpty(tag))
+            items = items.Where(g => g.Tags.Any(t => t.Contains(tag, StringComparison.OrdinalIgnoreCase)));
+        if (!string.IsNullOrEmpty(weapon))
+            items = items.Where(g =>
+                g.WeaponRequirements?.Contains(weapon, StringComparison.OrdinalIgnoreCase) == true);
+        var matched = items.ToList();
+        return new
+        {
+            ok        = true,
+            count     = Math.Min(matched.Count, 400),
+            truncated = matched.Count > 400,
+            gems      = matched.Take(400).Select(g => new
+            {
+                name          = g.Name,
+                baseTypeName  = g.BaseTypeName,
+                support       = g.Support,
+                tags          = g.Tags,
+                tagString     = g.TagString,
+                gemType       = g.GemType,
+                reqStr        = g.ReqStr,
+                reqDex        = g.ReqDex,
+                reqInt        = g.ReqInt,
+                naturalMaxLevel = g.NaturalMaxLevel,
+                tier          = g.Tier,
+                weaponRequirements = g.WeaponRequirements,
+                manaCost      = g.ManaCost,
+                description   = g.Description,
+            }).ToArray(),
+        };
+    }
+
+    private static object GemTooltip(string body)
+    {
+        var host = ItemDataHost();
+        if (host is null) return new { error = "No build page open or engine not ready." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("gemName", out var gn) || gn.ValueKind != JsonValueKind.String ||
+            string.IsNullOrEmpty(gn.GetString()))
+            return new { error = "Missing 'gemName'." };
+        var level = req.TryGetValue("level", out var lv) && lv.ValueKind == JsonValueKind.Number
+            ? lv.GetInt32() : 20;
+        var lines = host.GetGemTooltipByName(gn.GetString()!, level);
+        if (lines.Count == 0)
+            return new { error = $"Unknown gem '{gn.GetString()}' (check spelling via /skills/gem-catalog)." };
+        return new
+        {
+            ok    = true,
+            gem   = gn.GetString(),
+            lines = lines.Select(l => new { text = l.Text, kind = l.Kind }).ToArray(),
+        };
+    }
+
     private static object SkillsAddGroup(string body)
     {
         if (SkillsVmOrError(out var err) is not { } v) return err;
         var req = JsonSerializer.Deserialize<Dictionary<string, string>>(body) ?? new();
         req.TryGetValue("gemName", out var gemName);
+        // Имя должно резолвиться в каталоге: иначе Lua молча создаст группу
+        // с битым гемом ("Unrecognised gem name" до IPC не доходит).
+        var host = ItemDataHost();
+        if (host is not null)
+        {
+            var (active, support) = host.GetAvailableGemNames();
+            var all = active.Concat(support).ToList();
+            var resolved = GemNameMatcher.FindExact(gemName ?? "", all);
+            if (resolved is null)
+                return new
+                {
+                    error = $"Unknown gem name '{gemName}'. Resolve names via /skills/gem-catalog.",
+                    suggestions = GemNameMatcher.Suggest(gemName ?? "", all),
+                };
+            gemName = resolved;
+        }
         v.AddGroupFromPicker(gemName ?? "");
         return SkillsListing(v);
     }

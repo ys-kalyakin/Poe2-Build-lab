@@ -834,6 +834,34 @@ public class VisualTools
     }
 
     [McpServerTool]
+    [Description(
+        "Search the application's own gem catalogue (active and support gems that exist in its " +
+        "game data): name, tags, attribute requirements, max level, mana cost, weapon requirements, " +
+        "description. Use BEFORE visual_skills_add_group/add_gem — the app only accepts exact " +
+        "catalogue names, so resolve names here, not from memory. Filters combine; without filters " +
+        "returns up to 400 gems (truncated=true means narrow the query).")]
+    public async Task<string> VisualGemsList(
+        [Description("Substring on gem name or tag string, e.g. 'Fire'.")] string? query = null,
+        [Description("'active' or 'support'.")] string? type = null,
+        [Description("Substring on a tag, e.g. 'minion', 'projectile'.")] string? tag = null,
+        [Description("Substring on weapon requirements, e.g. 'Bow'.")] string? weapon = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/gem-catalog", new { query, type, tag, weapon }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Full tooltip of a (not necessarily equipped) gem by exact name: level, cost, " +
+        "reservation, cooldown, per-gem description. Use visual_gems_list first to resolve the name.")]
+    public async Task<string> VisualGemTooltip(
+        [Description("Exact gem name from visual_gems_list, e.g. 'Fireball'.")] string gemName,
+        [Description("Gem level for cost/reservation numbers. Default 20.")] int level = 20)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/gem-tooltip", new { gemName, level }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
     [Description("Read the support-gem picker state for a support slot: tabs, counts and filtered gem options. Address: group index + 0-based slot ordinal.")]
     public async Task<string> VisualSkillsSupportPicker(
         [Description("Group index.")] int group,
