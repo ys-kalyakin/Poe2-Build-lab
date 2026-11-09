@@ -115,6 +115,17 @@ dotnet build PBLMcp/PBLMcp.csproj -c Release
 персонажа из игры · `visual_export_open` — окно импорт/экспорт ·
 `visual_update_from_game` — обновить билд из аккаунта
 
+### Знания о вещах и цены (item-economy)
+`visual_item_bases {category?}` — какие базы существуют (по категории: имя,
+имплисит, требования, руны) · `visual_item_affixes {base}` — полный пул
+афиксов базы (префиксы/суффиксы, тиры, диапазоны) + коррапшн + руны ·
+`visual_item_uniques {query?}` — какие уники существуют ·
+`visual_prices_currency {type?, query?}` — курсы валют/осколков/рун/эссенций
+в дивинах (poe.ninja, кэш 1ч) · `visual_prices_uniques {type?, query?}` —
+цены уников в дивинах + число живых лотов + моды (poe.ninja, кэш 1ч).
+Цены rares по весам — только живой трейд (`visual_trader_*`, нужен логин
+пользователя: `loggedIn` в `visual_trader_state`).
+
 ### Headless (без окна)
 `new_build`, `load_build`, `get_build_xml`, `get_stats`, `set_custom_mods`,
 `add_skill`, `equip_item`, `list_builds`, `run_lua` — прямой движок;
@@ -149,6 +160,34 @@ MVVM-драйвер для тестов.
 3. `visual_skills_set_main {group}` → `visual_get_stats`.
 
 **Сохранить билд** — `visual_build_save` (XML по пути из ответа).
+
+**Оценить бюджет билда**
+0. Один раз: `visual_trader_open {slot}` — создаёт трейд-сессию, без неё
+   `visual_prices_*` вернут ошибку.
+1. Уники из билда: `visual_item_uniques` (или имена из тултипов) →
+   `visual_prices_uniques {query: имя}` по каждому (type по слоту).
+2. Крафт/валюта на апгрейды: `visual_prices_currency` (типы Essences,
+   SoulCores, Runes — что нужно по `visual_item_affixes`).
+3. Итог — сумма в дивинах; дешёвые замены уников ищи тем же
+   `visual_prices_uniques` по базе.
+
+**Найти дешёвый уник в слот**
+1. `visual_item_uniques {query: база или категория}` — кандидаты.
+2. `visual_prices_uniques {type: слот, query: имя}` — цена + `listingCount`
+   (много лотов = легко купить).
+3. Эффект — примеркой: трейд-флоу ниже или `visual_items_editor_create_new`
+   с уником → `visual_get_stats`.
+
+**Сколько стоит такой редкий предмет** (точная цена, нужен логин пользователя)
+1. `visual_trader_state` → `loggedIn: false` — попроси пользователя войти
+   в трейд-таб.
+2. `visual_trader_open {slot}` → веса статов через трейд-таб (или дефолт) →
+   `visual_trader_search {slot}`.
+3. `visual_trader_state` — результаты с ценой, dps/ehp-дельтой и
+   `valuePerDiv`; не трогай примерку без нужды пользователя.
+Ограничение: трейд лимитирован — точечные запросы, не перебор десятков
+вариантов; быстрые сравнения делай по `visual_item_affixes` (тиры) и
+`visual_prices_uniques` без сети трейда.
 
 ## Безопасность
 

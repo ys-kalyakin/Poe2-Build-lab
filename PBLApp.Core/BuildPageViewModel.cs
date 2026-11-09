@@ -130,6 +130,10 @@ public partial class BuildPageViewModel : ViewModelBase
 
     public TraderSession? TraderSession { get; private set; }
 
+    /// <summary>Хост Lua-движка для IPC-чтения данных вещей (базы, афиксы, уники);
+    /// null, пока движок не готов.</summary>
+    public LuaHost? Host => _host;
+
     /// <summary>Лениво создаёт сессию трейдера (её конструктор гоняет заметную Lua-работу:
     /// QueryMods + скан статов слотов), незачем платить при каждом открытии билда.</summary>
     public TraderSession EnsureTraderSession()

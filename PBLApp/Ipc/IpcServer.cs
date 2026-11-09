@@ -162,6 +162,9 @@ public sealed class IpcServer
                 "/items/editor-add-rune-socket"  => await OnUi(EditorAddRuneSocket),
                 "/items/editor-set-rune"         => await OnUi(() => EditorSetRune(body)),
                 "/items/editor-remove-rune-socket" => await OnUi(() => EditorRemoveRuneSocket(body)),
+                "/items/bases"       => await OnUi(() => ItemBases(body)),
+                "/items/affixes"     => await OnUi(() => ItemAffixes(body)),
+                "/items/uniques"     => await OnUi(() => ItemUniques(body)),
                 "/tree/state"             => await OnUi(TreeState),
                 "/tree/set-search"        => await OnUi(() => TreeSetSearch(body)),
                 "/tree/hover-node"        => await OnUi(() => TreeHoverNode(body)),
@@ -214,6 +217,8 @@ public sealed class IpcServer
                 "/trader/state"      => await OnUi(TraderState),
                 "/trader/open"       => await OnUi(() => TraderOpen(body)),
                 "/trader/search"     => await OnUi(() => TraderSearch(body)),
+                "/prices/currency"   => await OnUiAsync(() => PricesCurrency(body)),
+                "/prices/uniques"    => await OnUiAsync(() => PricesUniques(body)),
                 "/trader/set-league" => await OnUi(() => TraderSetLeague(body)),
                 _ => new { error = $"Unknown endpoint: {path}" }
             };
@@ -1852,6 +1857,163 @@ public sealed class IpcServer
                 perPoint  = r.PerPointStr,
                 steps     = r.StepsStr,
                 alloc     = r.IsAllocated,
+            }).ToArray(),
+        };
+    }
+
+    // ── Данные вещей для агента (существование, пулы афиксов) ────────────────
+
+    private static LuaHost? ItemDataHost()
+        => (GetMainVm()?.CurrentPage as BuildPageViewModel)?.Host;
+
+    private static object ItemBases(string body)
+    {
+        var host = ItemDataHost();
+        if (host is null) return new { error = "No build page open or engine not ready." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, string>>(body) ?? new();
+        var categories = host.GetItemBaseCategories();
+        if (!req.TryGetValue("category", out var category) || string.IsNullOrEmpty(category))
+            return new { categories };
+
+        var match = categories.FirstOrDefault(c => c.Equals(category, StringComparison.OrdinalIgnoreCase));
+        if (match is null)
+            return new { error = $"Unknown category '{category}'.", categories };
+        return new
+        {
+            category = match,
+            bases = host.GetItemBasesForCategory(match).Select(b => new
+            {
+                name = b.Name,
+                category = b.Category,
+                implicitMod = b.Implicit,
+                levelReq = b.LevelReq,
+                type = b.Type,
+                socketCount = b.SocketCount,
+            }).ToArray(),
+        };
+    }
+
+    private static object ItemAffixEntry(AffixEntry a) => new
+    {
+        id = a.Id,
+        name = a.AffixName,
+        statText = a.StatText,
+        type = a.AffixType,
+        level = a.Level,
+        group = a.Group,
+        tier = a.Tier,
+        tierCount = a.TierCount,
+    };
+
+    private static object ItemAffixes(string body)
+    {
+        var host = ItemDataHost();
+        if (host is null) return new { error = "No build page open or engine not ready." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, string>>(body) ?? new();
+        if (!req.TryGetValue("base", out var baseName) || string.IsNullOrEmpty(baseName))
+            return new { error = "Missing 'base'." };
+
+        var affixes = host.GetItemAffixes(baseName);
+        var corruption = host.GetItemCorruptedAffixes(baseName);
+        if (affixes.Count == 0 && corruption.Count == 0)
+        {
+            // подсказка агенту: базы с похожим именем по всем категориям
+            var guesses = host.GetItemBaseCategories()
+                .SelectMany(c => host.GetItemBasesForCategory(c))
+                .Where(b => b.Name.Contains(baseName, StringComparison.OrdinalIgnoreCase))
+                .Select(b => b.Name).Distinct().Take(10).ToArray();
+            return new { error = $"No affix pool for base '{baseName}'.", guesses };
+        }
+        return new
+        {
+            @base = baseName,
+            affixes = affixes.Select(ItemAffixEntry).ToArray(),
+            corruption = corruption.Select(ItemAffixEntry).ToArray(),
+            runes = host.GetAllRunes().Select(r => new
+            {
+                name = r.Name,
+                slotTypes = r.SlotTypes,
+                modsByType = r.ModsByType,
+                augType = r.AugType,
+            }).ToArray(),
+        };
+    }
+
+    private static object ItemUniques(string body)
+    {
+        var host = ItemDataHost();
+        if (host is null) return new { error = "No build page open or engine not ready." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, string>>(body) ?? new();
+        req.TryGetValue("query", out var query);
+        var uniques = host.GetUniqueItems();
+        if (!string.IsNullOrEmpty(query))
+            uniques = uniques.Where(u =>
+                u.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                u.BaseName.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                u.Category.Contains(query, StringComparison.OrdinalIgnoreCase)).ToList();
+        return new
+        {
+            count = uniques.Count,
+            uniques = uniques.Select(u => new
+            {
+                name = u.Name,
+                @base = u.BaseName,
+                category = u.Category,
+                lookupKey = u.LookupKey,
+            }).ToArray(),
+        };
+    }
+
+    // ── Цены для агента (ninja через сессию трейдера) ────────────────────────
+
+    private static (TraderSession?, object?) PriceSession()
+    {
+        var s = GetTraderSession();
+        return s is null
+            ? (null, (object)new { error = "Trader session not created. It appears when the trader window is opened once — call /trader/open (MCP: visual_trader_open) — then price tools work." })
+            : (s, null);
+    }
+
+    private static async Task<object> PricesCurrency(string body)
+    {
+        var (s, err) = PriceSession();
+        if (s is null) return err!;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        var type = req.TryGetValue("type", out var t) && t.GetString() is { Length: > 0 } ty ? ty : "Currency";
+        if (!PBLApp.Core.Trader.TraderWebApi.ExchangeTypes.Contains(type))
+            return new { error = $"Unknown exchange type '{type}'. Allowed: {string.Join(", ", PBLApp.Core.Trader.TraderWebApi.ExchangeTypes)}." };
+        var query = req.TryGetValue("query", out var qe) && qe.ValueKind == JsonValueKind.String ? qe.GetString() : null;
+
+        var rates = await s.GetExchangeRatesAsync(type);
+        var list = rates.Select(kv => new { name = kv.Key, value = kv.Value });
+        if (!string.IsNullOrEmpty(query))
+            list = list.Where(r => r.name.Contains(query, StringComparison.OrdinalIgnoreCase));
+        return new { league = s.SelectedLeague, type, rates = list.ToArray() };
+    }
+
+    private static async Task<object> PricesUniques(string body)
+    {
+        var (s, err) = PriceSession();
+        if (s is null) return err!;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        var type = req.TryGetValue("type", out var t) && t.GetString() is { Length: > 0 } ty ? ty : "UniqueArmours";
+        if (!PBLApp.Core.Trader.TraderWebApi.StashItemTypes.Contains(type))
+            return new { error = $"Unknown stash type '{type}'. Allowed: {string.Join(", ", PBLApp.Core.Trader.TraderWebApi.StashItemTypes)}." };
+        var query = req.TryGetValue("query", out var qe) && qe.ValueKind == JsonValueKind.String ? qe.GetString() : null;
+
+        var items = await s.GetUniquePricesAsync(type, query);
+        return new
+        {
+            league = s.SelectedLeague,
+            type,
+            items = items.Select(i => new
+            {
+                name = i.Name,
+                @base = i.BaseName,
+                price = i.DivineValue,
+                listingCount = i.ListingCount,
+                corrupted = i.Corrupted,
+                mods = i.Mods,
             }).ToArray(),
         };
     }

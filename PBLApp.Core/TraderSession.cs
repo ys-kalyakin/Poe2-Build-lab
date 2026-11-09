@@ -305,6 +305,24 @@ public partial class TraderSession : ViewModelBase
     public double? RateFor(string currencyId) =>
         _rates.TryGetValue(currencyId, out var v) ? v : null;
 
+    // ── Цены для агента (IPC /prices/*) ─────────────────────────────────────
+
+    /// <summary>Курсы exchange-типа ninja (TraderWebApi.ExchangeTypes) в дивинах —
+    /// лига сессии. Без выбранной лиги — пусто, без сети.</summary>
+    public Task<IReadOnlyDictionary<string, double>> GetExchangeRatesAsync(
+        string type, CancellationToken ct = default)
+        => string.IsNullOrEmpty(SelectedLeague)
+            ? Task.FromResult<IReadOnlyDictionary<string, double>>(new Dictionary<string, double>())
+            : _webApi.GetExchangeRatesAsync(SelectedLeague, type, ct);
+
+    /// <summary>Цены уников stash-типа ninja лиги сессии; query — substring по
+    /// name/baseType. Без выбранной лиги — пусто, без сети.</summary>
+    public Task<IReadOnlyList<UniquePriceEntry>> GetUniquePricesAsync(
+        string type, string? query = null, CancellationToken ct = default)
+        => string.IsNullOrEmpty(SelectedLeague)
+            ? Task.FromResult<IReadOnlyList<UniquePriceEntry>>([])
+            : _webApi.GetUniquePricesAsync(SelectedLeague, type, query, ct);
+
     // ── Логин ────────────────────────────────────────────────────────────────
 
     [RelayCommand]
