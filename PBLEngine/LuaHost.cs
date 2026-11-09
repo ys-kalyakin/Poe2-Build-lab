@@ -235,7 +235,7 @@ public sealed partial class LuaHost : IDisposable
                     sourceLabel = strip(group.sourceItem.name or group.sourceItem.title or '')
                 end
                 local incFull = group.includeInFullDPS and 1 or 0
-                table.insert(out, { i, name, strip(group.label or ''), enabled, isTrigger, source, sourceLabel, incFull })
+                table.insert(out, { i, name, strip(group.label or ''), enabled, isTrigger, source, sourceLabel, incFull, group.slot })
             end
             return out
         ");
@@ -252,7 +252,8 @@ public sealed partial class LuaHost : IDisposable
                 var source      = row[6L] as string ?? "";
                 var sourceLabel = row[7L] as string ?? "";
                 var incFull     = row[8L] is long inc && inc == 1L;
-                groups.Add(new SkillGroupEntry(idx, name, label, enabled, isTrigger, source, sourceLabel, incFull));
+                var slot        = row[9L] as string;
+                groups.Add(new SkillGroupEntry(idx, name, label, enabled, isTrigger, source, sourceLabel, incFull, slot));
             }
         }
         return groups;
@@ -864,6 +865,92 @@ public sealed partial class LuaHost : IDisposable
         return lines;
     }
 
+    /// <summary>Полный каталог гемов data.gems одним проходом (активы и саппорты):
+    /// имя, теги, требования, naturalMaxLevel, мана-кост на максимуме — источник
+    /// правды для MCP-агента перед add_group/add_gem.</summary>
+    public List<GemCatalogEntry> GetGemCatalog()
+    {
+        var list = new List<GemCatalogEntry>();
+        var result = State.DoString(@"
+            if not (data and data.gems) then return nil end
+            local function weaponReqText(wr)
+                if not wr then return nil end
+                if type(wr) == 'string' then return wr end
+                if type(wr) == 'table' then
+                    local parts = {}
+                    for _, v in pairs(wr) do table.insert(parts, tostring(v)) end
+                    if #parts > 0 then return table.concat(parts, ', ') end
+                end
+                return nil
+            end
+            local out = {}
+            for _, gem in pairs(data.gems) do
+                local ge = gem.grantedEffect
+                local tags = {}
+                if gem.tags then
+                    for k, v in pairs(gem.tags) do
+                        if v then table.insert(tags, k) end
+                    end
+                end
+                table.sort(tags)
+                local mana = nil
+                if ge and ge.levels and #ge.levels > 0 then
+                    local lv = gem.naturalMaxLevel or #ge.levels
+                    if lv < 1 then lv = 1 end
+                    if lv > #ge.levels then lv = #ge.levels end
+                    local gel = ge.levels[lv]
+                    if gel and gel.cost and gel.cost.Mana then mana = gel.cost.Mana end
+                end
+                table.insert(out, {
+                    name        = gem.name or '',
+                    baseType    = gem.baseTypeName or '',
+                    support     = (ge and ge.support) or false,
+                    tags        = tags,
+                    tagString   = gem.tagString or '',
+                    gemType     = gem.gemType or '',
+                    reqStr      = gem.reqStr or 0,
+                    reqDex      = gem.reqDex or 0,
+                    reqInt      = gem.reqInt or 0,
+                    naturalMax  = gem.naturalMaxLevel or 0,
+                    tier        = gem.Tier or 0,
+                    weaponReq   = weaponReqText(gem.weaponRequirements),
+                    manaCost    = mana,
+                    description = ge and ge.description or nil,
+                })
+            end
+            table.sort(out, function(a, b) return a.name < b.name end)
+            return out
+        ");
+        if (result is { Length: > 0 } && result[0] is NLua.LuaTable tbl)
+        {
+            foreach (var k in tbl.Keys)
+            {
+                if (tbl[k] is not NLua.LuaTable g) continue;
+                var tags = new List<string>();
+                if (g["tags"] is NLua.LuaTable tt)
+                    foreach (var tk in tt.Keys)
+                        if (tt[tk] is string s) tags.Add(s);
+                list.Add(new GemCatalogEntry(
+                    Name:            g["name"] as string ?? "",
+                    BaseTypeName:    g["baseType"] as string ?? "",
+                    Support:         g["support"] is bool b && b,
+                    Tags:            tags,
+                    TagString:       g["tagString"] as string ?? "",
+                    GemType:         g["gemType"] as string ?? "",
+                    ReqStr:          g["reqStr"] is long rs ? (int)rs : 0,
+                    ReqDex:          g["reqDex"] is long rd ? (int)rd : 0,
+                    ReqInt:          g["reqInt"] is long ri ? (int)ri : 0,
+                    NaturalMaxLevel: g["naturalMax"] is long nm ? (int)nm : 0,
+                    Tier:            g["tier"] is long t ? (int)t : 0,
+                    WeaponRequirements: g["weaponReq"] as string,
+                    ManaCost:        g["manaCost"] is double mc ? mc : g["manaCost"] is long mcl ? mcl : 0,
+                    Description:     g["description"] as string
+                ));
+            }
+        }
+        return list;
+    }
+
     public Dictionary<string, string> GetGemColors()
     {
         var dict = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -1036,6 +1123,150 @@ public sealed partial class LuaHost : IDisposable
                 ExtraWeaponSetPoints: N(8L));
         }
         return null;
+    }
+
+    /// <summary>Свод предупреждений билда из уже посчитанного mainEnv/mainOutput:
+    /// несходящиеся атрибуты (Req* > *), отрицательные незарезервированные пулы,
+    /// cost-предупреждения скилов, itemWarnings движка, отключённые скилы
+    /// (skillFlags.disable). Бюджет очков — из GetPointUsage, перерасход
+    /// превращается в issue 'points' на стороне C#.</summary>
+    public BuildValidation GetBuildValidation()
+    {
+        var result = State.DoString(@"
+            if not (build and build.calcsTab) then return nil end
+            local out  = build.calcsTab.mainOutput
+            local env  = build.calcsTab.mainEnv
+            local issues = {}
+            local function addIssue(code, msg, src)
+                table.insert(issues, {code = code, message = tostring(msg), source = src})
+            end
+            if out then
+                -- требования атрибутов: ReqStr/ReqDex/ReqInt vs Str/Dex/Int
+                local attrs = {
+                    {'Str', 'Strength'},
+                    {'Dex', 'Dexterity'},
+                    {'Int', 'Intelligence'},
+                }
+                for _, a in ipairs(attrs) do
+                    local req  = out['Req' .. a[1]]
+                    local have = out[a[1]]
+                    if type(req) == 'number' and type(have) == 'number' and req > have then
+                        local src
+                        local reqItem = out['Req' .. a[1] .. 'Item']
+                        if type(reqItem) == 'table' and reqItem.source then
+                            src = tostring(reqItem.source)
+                        end
+                        addIssue('attrs', string.format(
+                            'You do not meet the %s requirement: need %d, have %d', a[2], req, have), src)
+                    end
+                end
+                -- отрицательные незарезервированные пулы
+                local pools = {
+                    {'LifeUnreserved', 'Life'},
+                    {'ManaUnreserved', 'Mana'},
+                    {'SpiritUnreserved', 'Spirit'},
+                }
+                for _, p in ipairs(pools) do
+                    local v = out[p[1]]
+                    if type(v) == 'number' and v < 0 then
+                        addIssue('pool', string.format('Your unreserved %s is negative (%d)', p[2], v))
+                    end
+                end
+                -- не хватает пула на скил (скалярные warning-флаги Calcs)
+                local costs = {
+                    {'LifeCostWarning', 'Life'},
+                    {'ManaCostWarning', 'Mana'},
+                    {'RageCostWarning', 'Rage'},
+                    {'ESCostWarning', 'Energy Shield'},
+                }
+                for _, c in ipairs(costs) do
+                    if out[c[1]] == true then
+                        addIssue('cost', string.format('Not enough %s pool for some skills', c[2]))
+                    end
+                end
+            end
+            -- предупреждения предметов/джевелов из движка. В PoB itemWarnings —
+            -- вложенные таблицы (jewelLimitWarning/socketLimitWarning — массивы
+            -- строк, CalcSetup.lua:958/2127): отдаём строки предупреждений,
+            -- а не имена ключей.
+            if env and env.itemWarnings then
+                for k, w in pairs(env.itemWarnings) do
+                    if type(w) == 'table' then
+                        for _, line in pairs(w) do
+                            if type(line) == 'string' and line ~= '' then
+                                addIssue('item', line)
+                            end
+                        end
+                    elseif type(w) == 'string' and w ~= '' then
+                        addIssue('item', w)
+                    elseif type(k) == 'string' then
+                        addIssue('item', k)
+                    end
+                end
+            end
+            -- отключённые активные скилы
+            local disabled = {}
+            if env and env.player and env.player.activeSkillList then
+                for _, skill in pairs(env.player.activeSkillList) do
+                    local flags = skill.skillFlags
+                    if flags and flags.disable and flags.disableReason then
+                        local gi = 0
+                        if build.skillsTab and skill.socketGroup then
+                            for idx, grp in ipairs(build.skillsTab.socketGroupList) do
+                                if grp == skill.socketGroup then gi = idx; break end
+                            end
+                        end
+                        local nm = skill.name
+                        if (not nm or nm == '') and skill.activeEffect and skill.activeEffect.grantedEffect then
+                            nm = skill.activeEffect.grantedEffect.name
+                        end
+                        table.insert(disabled, {
+                            groupIndex = gi,
+                            gemName    = tostring(nm or '?'),
+                            reason     = tostring(flags.disableReason),
+                        })
+                    end
+                end
+            end
+            return { issues = issues, disabled = disabled }
+        ");
+        var issues = new List<ValidationIssue>();
+        var disabled = new List<DisabledSkillEntry>();
+        if (result is { Length: > 0 } && result[0] is LuaTable tbl)
+        {
+            if (tbl["issues"] is LuaTable it)
+                foreach (var k in it.Keys)
+                {
+                    if (it[k] is not LuaTable row) continue;
+                    issues.Add(new ValidationIssue(
+                        Code:    row["code"] as string ?? "",
+                        Message: row["message"] as string ?? "",
+                        Source:  row["source"] as string));
+                }
+            if (tbl["disabled"] is LuaTable dt)
+                foreach (var k in dt.Keys)
+                {
+                    if (dt[k] is not LuaTable row) continue;
+                    disabled.Add(new DisabledSkillEntry(
+                        GroupIndex: row["groupIndex"] is { } gi ? Convert.ToInt32(gi) : 0,
+                        GemName:    row["gemName"] as string ?? "?",
+                        Reason:     row["reason"] as string ?? ""));
+                }
+        }
+        var points = GetPointUsage() ?? new PointUsage(0, 0, 0, 8, 0, 0, 0, 0);
+        if (points.PassivesUsed > points.PassivesMax)
+            issues.Add(new ValidationIssue("points",
+                $"Too many passive points: {points.PassivesUsed}/{points.PassivesMax}"));
+        if (points.AscendancyUsed > points.AscendancyMax)
+            issues.Add(new ValidationIssue("points",
+                $"Too many ascendancy points: {points.AscendancyUsed}/{points.AscendancyMax}"));
+        if (points.WeaponSet1Used > points.WeaponSetMax)
+            issues.Add(new ValidationIssue("points",
+                $"Too many weapon set 1 points: {points.WeaponSet1Used}/{points.WeaponSetMax}"));
+        if (points.WeaponSet2Used > points.WeaponSetMax)
+            issues.Add(new ValidationIssue("points",
+                $"Too many weapon set 2 points: {points.WeaponSet2Used}/{points.WeaponSetMax}"));
+        return new BuildValidation(points, issues, disabled);
     }
 
     public Dictionary<string, object?> GetAllStats()
@@ -2823,6 +3054,59 @@ public sealed partial class LuaHost : IDisposable
             foreach (var k in tbl.Keys)
                 if (tbl[k] is long al) set.Add((int)al);
         return set;
+    }
+
+    /// <summary>Режим аллокации дерева: 0 — общий, 1/2 — weapon set 1/2
+    /// (Lua spec.allocMode). Аллокация в режимах 1/2 помечает узлы
+    /// node.allocMode и считается из отдельного weapon-set пула очков.</summary>
+    public void SetAllocMode(int mode)
+    {
+        if (mode is < 0 or > 2)
+            throw new ArgumentOutOfRangeException(nameof(mode), mode, "allocMode is 0 (shared), 1 or 2 (weapon set).");
+        State["_allocMode"] = (long)mode;
+        State.DoString("if build and build.spec then build.spec.allocMode = _allocMode end");
+        State["_allocMode"] = null;
+    }
+
+    /// <summary>Карта принадлежности аллоцированных узлов: nodeId → allocMode
+    /// (0 общий, 1/2 — weapon set). Двух узлов с одним id не бывает.</summary>
+    public Dictionary<int, int> GetAllocatedNodeModes()
+    {
+        var dict = new Dictionary<int, int>();
+        var result = State.DoString(@"
+            if not (build and build.spec) then return nil end
+            local modes = {}
+            for id, node in pairs(build.spec.allocNodes or {}) do
+                modes[#modes+1] = {tonumber(id), node.allocMode or 0}
+            end
+            return modes
+        ");
+        if (result is { Length: > 0 } && result[0] is LuaTable tbl)
+            foreach (var k in tbl.Keys)
+                if (tbl[k] is LuaTable row && row[1L] is { } idv && row[2L] is { } mv)
+                    dict[Convert.ToInt32(idv)] = Convert.ToInt32(mv);
+        return dict;
+    }
+
+    /// <summary>Привязка скил-группы к weapon set через slot: "Weapon 1" (set 1),
+    /// "Weapon 1 Swap" (set 2), null — снять (группа активна всегда/по слоту).
+    /// Расчёт учитывает группу, когда slot.weaponSet совпадает с активным сетом
+    /// (CalcSetup.lua:1729).</summary>
+    public void SetGroupSlot(int groupIndex, string? slot)
+    {
+        State["_grpIdx"]  = (long)groupIndex;
+        State["_grpSlot"] = slot;
+        State.DoString(@"
+            if not (build and build.skillsTab) then return end
+            local group = build.skillsTab.socketGroupList[_grpIdx]
+            if not group then return end
+            group.slot = _grpSlot
+            if group.slot == '' then group.slot = nil end
+            build.skillsTab:ProcessSocketGroup(group)
+        ");
+        State["_grpIdx"]  = null;
+        State["_grpSlot"] = null;
+        TriggerRecalc();
     }
 
     /// <summary>Single round-trip variant of <see cref="GetAllocatedNodeIds"/>

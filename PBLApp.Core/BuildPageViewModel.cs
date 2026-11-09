@@ -308,7 +308,7 @@ public partial class BuildPageViewModel : ViewModelBase
 
     /// <summary>Пересобирает вкладки после того, как в движок влили нового персонажа:
     /// поменяться могло всё — дерево, снаряжение, группы умений и сами статы.</summary>
-    private void RefreshAfterImport()
+    public void RefreshAfterImport()
     {
         Build?.Refresh();
         TreeTab?.RefreshFromEngine();

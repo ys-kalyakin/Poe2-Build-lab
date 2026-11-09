@@ -134,6 +134,7 @@ public sealed class IpcServer
                 "/open-build"    => await OnUi(() => OpenBuild(body)),
                 "/go-back"       => await OnUi(GoBack),
                 "/items/state"        => await OnUi(ItemsState),
+                "/items/select-weapon-set" => await OnUi(() => ItemsSelectWeaponSet(body)),
                 "/items/select-slot"  => await OnUi(() => ItemsSelectSlot(body)),
                 "/items/select-pool"  => await OnUi(() => ItemsSelectPool(body)),
                 "/items/equip"        => await OnUi(() => ItemsEquip(body)),
@@ -151,6 +152,7 @@ public sealed class IpcServer
                 "/items/editor-save"             => await OnUi(EditorSave),
                 "/items/editor-create-new"       => await OnUi(() => EditorCreateNew(body)),
                 "/items/editor-set-quality"      => await OnUi(() => EditorSetQuality(body)),
+                "/items/editor-set-item-level"   => await OnUi(() => EditorSetItemLevel(body)),
                 "/items/editor-set-corrupted"    => await OnUi(() => EditorSetCorrupted(body)),
                 "/items/editor-set-rarity"       => await OnUi(() => EditorSetRarity(body)),
                 "/items/editor-set-base"         => await OnUi(() => EditorSetBase(body)),
@@ -187,6 +189,9 @@ public sealed class IpcServer
                 "/tree/nodes"             => await OnUi(() => TreeNodes(body)),
                 "/skills/tooltips"        => await OnUi(SkillsTooltips),
                 "/skills/list"            => await OnUi(SkillsList),
+                "/skills/dps"             => await OnUi(SkillsDps),
+                "/skills/gem-catalog"     => await OnUi(() => GemCatalog(body)),
+                "/skills/gem-tooltip"     => await OnUi(() => GemTooltip(body)),
                 "/skills/add-group"       => await OnUi(() => SkillsAddGroup(body)),
                 "/skills/remove-group"    => await OnUi(() => SkillsRemoveGroup(body)),
                 "/skills/add-gem"         => await OnUi(() => SkillsAddGem(body)),
@@ -205,8 +210,12 @@ public sealed class IpcServer
                 "/export/open"           => await OnUi(() => ImportExportOpen(body)),
                 "/build/update-from-game" => await OnUi(UpdateFromGame),
                 "/stats"         => await OnUi(() => GetStatsFiltered(ctx.Request.Url?.Query ?? "")),
+                "/stats/snapshot" => await OnUi(() => StatsSnapshot(body)),
+                "/stats/diff"     => await OnUi(() => StatsDiffHandler(ctx.Request.Url?.Query ?? "")),
                 "/build/save"    => await OnUiAsync(BuildSave),
                 "/build/xml"     => await OnUi(BuildXml),
+                "/build/import"  => await OnUiAsync(() => BuildImport(body)),
+                "/build/validate" => await OnUi(BuildValidate),
                 "/notes"         => ctx.Request.HttpMethod == "POST"
                                         ? await OnUi(() => NotesSet(body))
                                         : await OnUi(NotesGet),
@@ -379,6 +388,7 @@ public sealed class IpcServer
         var req  = JsonSerializer.Deserialize<Dictionary<string, string>>(body) ?? new();
         if (GetMainVm()?.CurrentPage is not BuildListViewModel bl)
             return new { error = "Not on BuildList page." };
+        ClearStatSnapshots();   // снапшоты статов принадлежат конкретному билду
         if (!req.TryGetValue("name", out var name) || string.IsNullOrWhiteSpace(name))
             return new { error = "Missing 'name'." };
 
@@ -474,6 +484,23 @@ public sealed class IpcServer
         v.Ring1, v.Ring2, v.Ring3, v.Gloves, v.Boots, v.Belt, v.Amulet,
         v.Flask1, v.Flask2, v.Charm1, v.Charm2, v.Charm3,
         v.Arm1, v.Arm2, v.Leg1, v.Leg2 ];
+
+    /// <summary>Переключение активного weapon set (Weapon Set I / II) — влияет на
+    /// то, какие скил-группы считаются (slot.weaponSet) и какие цифры показывает
+    /// расчёт. set: 1 или 2.</summary>
+    private static object ItemsSelectWeaponSet(string body)
+    {
+        if (GetItemsVm() is not { } v) return new { error = "ItemsTab not ready." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("set", out var s) || s.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'set' (1 or 2)." };
+        var set = s.GetInt32();
+        if (set is not (1 or 2))
+            return new { error = $"Invalid weapon set {set}. Allowed: 1, 2." };
+        if (set == 1) v.SelectWeaponSet1Command.Execute(null);
+        else v.SelectWeaponSet2Command.Execute(null);
+        return new { ok = true, weaponSet = set, isWeaponSwapActive = set == 2 };
+    }
 
     private static object ItemsState()
     {
@@ -783,16 +810,23 @@ public sealed class IpcServer
     private static object SkillsListing(SkillsTabViewModel v) => new
     {
         ok = true,
-        groups = v.Groups.Select(g => new
+        isWeaponSwapActive = ItemDataHost()?.IsWeaponSwapActive() ?? false,
+        groups = v.Groups.Select(g =>
         {
-            index            = g.Index,
-            name             = g.ActiveGemName,
-            isMain           = g.IsMain,
-            enabled          = g.IsEnabled,
-            includeInFullDps = g.IncludeInFullDps,
-            isGranted        = g.IsGranted,
-            sourceLabel      = g.SourceLabel,
-            gems             = SkillGemList(g),
+            // slot из движка (weapon set привязка через group.slot)
+            var entry = ItemDataHost()?.GetSkillGroups().FirstOrDefault(e => e.Index == g.Index);
+            return new
+            {
+                index            = g.Index,
+                name             = g.ActiveGemName,
+                isMain           = g.IsMain,
+                enabled          = g.IsEnabled,
+                includeInFullDps = g.IncludeInFullDps,
+                isGranted        = g.IsGranted,
+                sourceLabel      = g.SourceLabel,
+                slot             = entry?.Slot,
+                gems             = SkillGemList(g),
+            };
         }).ToArray(),
     };
 
@@ -825,12 +859,129 @@ public sealed class IpcServer
         return SkillsListing(v);
     }
 
+    /// <summary>DPS-разрез: разбивка Full DPS по скилам (только группы с
+    /// includeInFullDPS) + итоги + метаданные групп. Чистый read: группу не
+    /// видно — включи ей includeInFullDps (/skills/set-group) и перечитай.</summary>
+    private static object SkillsDps()
+    {
+        var host = ItemDataHost();
+        if (host is null) return new { error = "No build page open or engine not ready." };
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        var stats = bp.Build?.AllStats;
+        if (stats is null) return new { error = "Build not loaded yet." };
+        var mainIdx = host.GetMainSkillGroupIndex();
+        return new
+        {
+            ok       = true,
+            totalDps = stats.TryGetValue("TotalDPS", out var td) ? td : null,
+            fullDps  = stats.TryGetValue("FullDPS", out var fd) ? fd : null,
+            skills   = host.GetFullDpsBreakdown().Select(s => new
+            {
+                name  = s.Name,
+                dps   = s.Dps,
+                count = s.Count,
+                total = s.Total,
+            }).ToArray(),
+            groups = host.GetSkillGroups().Select(g => new
+            {
+                index            = g.Index,
+                name             = g.Name,
+                isMain           = g.Index == mainIdx,
+                includeInFullDps = g.IncludeInFullDPS,
+            }).ToArray(),
+        };
+    }
+
+    // Каталог гемов статичен в рамках версии данных — кэшируем на процесс.
+    private static List<GemCatalogEntry>? _gemCatalogCache;
+
+    private static object GemCatalog(string body)
+    {
+        var host = ItemDataHost();
+        if (host is null) return new { error = "No build page open or engine not ready." };
+        _gemCatalogCache ??= host.GetGemCatalog();
+        var catalog = _gemCatalogCache;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        string? Param(string key) =>
+            req.TryGetValue(key, out var e) && e.ValueKind == JsonValueKind.String ? e.GetString() : null;
+        var query = Param("query");
+        var type  = Param("type");
+        var tag   = Param("tag");
+        var weapon = Param("weapon");
+        IEnumerable<GemCatalogEntry> items = catalog;
+        if (!string.IsNullOrEmpty(query))
+            items = items.Where(g =>
+                g.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                g.TagString.Contains(query, StringComparison.OrdinalIgnoreCase));
+        if (!string.IsNullOrEmpty(type))
+        {
+            if (type.Equals("active", StringComparison.OrdinalIgnoreCase))
+                items = items.Where(g => !g.Support);
+            else if (type.Equals("support", StringComparison.OrdinalIgnoreCase))
+                items = items.Where(g => g.Support);
+            else
+                return new { error = $"Unknown type '{type}'. Allowed: active, support." };
+        }
+        if (!string.IsNullOrEmpty(tag))
+            items = items.Where(g => g.Tags.Any(t => t.Contains(tag, StringComparison.OrdinalIgnoreCase)));
+        if (!string.IsNullOrEmpty(weapon))
+            items = items.Where(g =>
+                g.WeaponRequirements?.Contains(weapon, StringComparison.OrdinalIgnoreCase) == true);
+        var matched = items.ToList();
+        return new
+        {
+            ok        = true,
+            count     = Math.Min(matched.Count, 400),
+            truncated = matched.Count > 400,
+            gems      = matched.Take(400).Select(g => new
+            {
+                name          = g.Name,
+                baseTypeName  = g.BaseTypeName,
+                support       = g.Support,
+                tags          = g.Tags,
+                tagString     = g.TagString,
+                gemType       = g.GemType,
+                reqStr        = g.ReqStr,
+                reqDex        = g.ReqDex,
+                reqInt        = g.ReqInt,
+                naturalMaxLevel = g.NaturalMaxLevel,
+                tier          = g.Tier,
+                weaponRequirements = g.WeaponRequirements,
+                manaCost      = g.ManaCost,
+                description   = g.Description,
+            }).ToArray(),
+        };
+    }
+
+    private static object GemTooltip(string body)
+    {
+        var host = ItemDataHost();
+        if (host is null) return new { error = "No build page open or engine not ready." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("gemName", out var gn) || gn.ValueKind != JsonValueKind.String ||
+            string.IsNullOrEmpty(gn.GetString()))
+            return new { error = "Missing 'gemName'." };
+        var level = req.TryGetValue("level", out var lv) && lv.ValueKind == JsonValueKind.Number
+            ? lv.GetInt32() : 20;
+        var lines = host.GetGemTooltipByName(gn.GetString()!, level);
+        if (lines.Count == 0)
+            return new { error = $"Unknown gem '{gn.GetString()}' (check spelling via /skills/gem-catalog)." };
+        return new
+        {
+            ok    = true,
+            gem   = gn.GetString(),
+            lines = lines.Select(l => new { text = l.Text, kind = l.Kind }).ToArray(),
+        };
+    }
+
     private static object SkillsAddGroup(string body)
     {
         if (SkillsVmOrError(out var err) is not { } v) return err;
         var req = JsonSerializer.Deserialize<Dictionary<string, string>>(body) ?? new();
         req.TryGetValue("gemName", out var gemName);
-        v.AddGroupFromPicker(gemName ?? "");
+        var (nameErr, resolved) = ResolveGemName(gemName);
+        if (nameErr is not null) return nameErr;
+        v.AddGroupFromPicker(resolved ?? "");
         return SkillsListing(v);
     }
 
@@ -847,6 +998,26 @@ public sealed class IpcServer
         return SkillsListing(v);
     }
 
+    /// <summary>Резолв имени гема по каталогу: (null, resolved) при успехе,
+    /// (error, null) при промахе — с подсказками. Общий для add-group/add-gem/
+    /// set-gem: иначе Lua молча создаст битый гем ("Unrecognised gem name"
+    /// до IPC не доходит).</summary>
+    private static (object? Error, string? Resolved) ResolveGemName(string? gemName)
+    {
+        var host = ItemDataHost();
+        if (host is null) return (null, gemName);   // нет движка — пусть VM отработает как раньше
+        var (active, support) = host.GetAvailableGemNames();
+        var all = active.Concat(support).ToList();
+        var resolved = GemNameMatcher.FindExact(gemName ?? "", all);
+        return resolved is null
+            ? (new
+               {
+                   error = $"Unknown gem name '{gemName}'. Resolve names via /skills/gem-catalog.",
+                   suggestions = GemNameMatcher.Suggest(gemName ?? "", all),
+               }, null)
+            : (null, resolved);
+    }
+
     private static object SkillsAddGem(string body)
     {
         if (SkillsVmOrError(out var err) is not { } v) return err;
@@ -858,12 +1029,15 @@ public sealed class IpcServer
             string.IsNullOrWhiteSpace(ne.GetString()))
             return new { error = "Missing 'gemName'." };
 
+        var (nameErr, resolved) = ResolveGemName(ne.GetString());
+        if (nameErr is not null) return nameErr;
+
         v.AddGem(grp.Index);
         var fresh = v.Groups.First(g => g.Index == grp.Index);
         int newIdx = new[] { fresh.ActiveGem }.Concat(fresh.SupportSlots)
             .Where(x => x is { GemIndex: > 0 })
             .Max(x => x!.GemIndex);
-        v.CommitGemName(grp.Index, newIdx, ne.GetString()!);
+        v.CommitGemName(grp.Index, newIdx, resolved!);
         return SkillsListing(v);
     }
 
@@ -893,7 +1067,11 @@ public sealed class IpcServer
         int gem = gme.GetInt32();
 
         if (req.TryGetValue("name", out var ne) && ne.ValueKind == JsonValueKind.String)
-            v.CommitGemName(grp.Index, gem, ne.GetString() ?? "");
+        {
+            var (nameErr, resolved) = ResolveGemName(ne.GetString());
+            if (nameErr is not null) return nameErr;
+            v.CommitGemName(grp.Index, gem, resolved ?? "");
+        }
         if (req.TryGetValue("level", out var le) && le.ValueKind == JsonValueKind.Number)
             v.SyncGemLevel(grp.Index, gem, le.GetInt32());
         if (req.TryGetValue("quality", out var qe) && qe.ValueKind == JsonValueKind.Number)
@@ -924,6 +1102,17 @@ public sealed class IpcServer
             v.SyncGroupIncludeInFullDps(grp.Index, fe.GetBoolean());
         if (req.TryGetValue("label", out var lb) && lb.ValueKind == JsonValueKind.String)
             v.SetGroupLabel(grp.Index, lb.GetString() ?? "");
+        // Привязка группы к weapon set: 1/2 → slot "Weapon 1"/"Weapon 1 Swap",
+        // 0 — снять привязку (CalcSetup считает группу по slot.weaponSet).
+        if (req.TryGetValue("weaponSet", out var wse))
+        {
+            var ws = wse.ValueKind == JsonValueKind.Number ? wse.GetInt32()
+                   : wse.ValueKind == JsonValueKind.True ? 1 : 0;
+            if (ws is < 0 or > 2)
+                return new { error = "weaponSet is 0 (none), 1 or 2 (weapon set)." };
+            var host = ItemDataHost();
+            host?.SetGroupSlot(grp.Index, ws switch { 1 => "Weapon 1", 2 => "Weapon 1 Swap", _ => null });
+        }
 
         v.Refresh();
         return SkillsListing(v);
@@ -1253,6 +1442,17 @@ public sealed class IpcServer
         return new { ok = true, quality = ed.Quality };
     }
 
+    /// <summary>Уровень предмета (item level) в редакторе: определяет, какие тиры
+    /// афиксов доступны (CanAddAffix гейтит e.Level > ItemLevel). Кламп 1..100.</summary>
+    private static object EditorSetItemLevel(string body)
+    {
+        if (GetEditor() is not { } ed) return new { error = "No editor open." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, int>>(body) ?? new();
+        if (!req.TryGetValue("level", out var l)) return new { error = "Missing 'level'." };
+        ed.ItemLevel = Math.Clamp(l, 1, 100);
+        return new { ok = true, itemLevel = ed.ItemLevel };
+    }
+
     private static object EditorSetCorrupted(string body)
     {
         if (GetEditor() is not { } ed) return new { error = "No editor open." };
@@ -1350,8 +1550,33 @@ public sealed class IpcServer
             a.Entry.AffixName.Contains(q, StringComparison.OrdinalIgnoreCase))
             ?? ed.FilteredAffixes.FirstOrDefault(a =>
             a.Entry.StatText.Contains(q, StringComparison.OrdinalIgnoreCase));
-        if (match is null) return new { error = $"No matching affix for '{q}'." };
-        if (!ed.CanAddAffix(match.Entry)) return new { error = "Cannot add this affix (capped/duplicated)." };
+        if (match is null)
+        {
+            // Афикс мог быть отфильтрован гейтом ilvl — дадим внятную причину.
+            var hidden = ed.AllAffixEntries.FirstOrDefault(a =>
+                    a.AffixName.Contains(q, StringComparison.OrdinalIgnoreCase))
+                ?? ed.AllAffixEntries.FirstOrDefault(a =>
+                    a.StatText.Contains(q, StringComparison.OrdinalIgnoreCase));
+            if (hidden is not null && hidden.Level > ed.ItemLevel)
+                return new
+                {
+                    error = $"Affix '{hidden.AffixName}' (tier level {hidden.Level}) requires " +
+                            $"item level ≥ {hidden.Level} (current {ed.ItemLevel}) — " +
+                            "call visual_editor_set_item_level.",
+                };
+            return new { error = $"No matching affix for '{q}'." };
+        }
+        if (!ed.CanAddAffix(match.Entry))
+        {
+            if (match.Entry.Level > ed.ItemLevel)
+                return new
+                {
+                    error = $"Affix '{match.Entry.AffixName}' (tier level {match.Entry.Level}) requires " +
+                            $"item level ≥ {match.Entry.Level} (current {ed.ItemLevel}) — " +
+                            "call visual_editor_set_item_level.",
+                };
+            return new { error = "Cannot add this affix (capped/duplicated)." };
+        }
         ed.AddAffix(match.Entry);
         return new { ok = true, added = match.Entry.AffixName, statText = match.Entry.StatText };
     }
@@ -1568,12 +1793,15 @@ public sealed class IpcServer
         if (GetTreeVm() is not { } t) return new { error = "TreeTab not ready." };
         var alloc = t.AllocatedIds.OrderBy(x => x).ToArray();
         var byId  = t.Nodes.ToDictionary(n => n.Id);
+        // Принадлежность узла к weapon set: 0 — общий, 1/2 — weapon set.
+        var modes = ItemDataHost()?.GetAllocatedNodeModes() ?? new Dictionary<int, int>();
         var nodes = alloc.Where(byId.ContainsKey).Select(id => new
         {
             id,
             name       = byId[id].Name,
             type       = byId[id].Type,
             ascendancy = byId[id].AscendancyName,
+            allocMode  = modes.TryGetValue(id, out var m) ? m : 0,
         }).ToArray();
         var usage = t.PointUsage;
         return new
@@ -1595,8 +1823,10 @@ public sealed class IpcServer
         string? attribute = req.TryGetValue("attribute", out var a) && a.ValueKind == JsonValueKind.String
             ? a.GetString()
             : null;
+        int weaponSet = req.TryGetValue("weaponSet", out var w) && w.ValueKind == JsonValueKind.Number
+            ? w.GetInt32() : 0;
 
-        var r = await t.AllocatePathTo(n.GetInt32(), attribute);
+        var r = await t.AllocatePathTo(n.GetInt32(), attribute, weaponSet);
         await t.WaitForEngineSettledAsync();   // idempotent; AllocatePathTo settles internally
         var usage = t.PointUsage;
         return new
@@ -1618,8 +1848,10 @@ public sealed class IpcServer
         var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
         if (!req.TryGetValue("nodeId", out var n) || n.ValueKind != JsonValueKind.Number)
             return new { error = "Missing 'nodeId'." };
+        int weaponSet = req.TryGetValue("weaponSet", out var w) && w.ValueKind == JsonValueKind.Number
+            ? w.GetInt32() : 0;
 
-        var (ok, error, dependents) = await t.DeallocateNode(n.GetInt32());
+        var (ok, error, dependents) = await t.DeallocateNode(n.GetInt32(), weaponSet);
         await t.WaitForEngineSettledAsync();
         return new { ok, error, dependents };
     }
@@ -2108,6 +2340,70 @@ public sealed class IpcServer
 
     /// <summary>Full stat dump of the open build, optionally filtered:
     /// GET /stats?keys=TotalDPS,Life — empty keys returns all (~600) stats.</summary>
+    // ── Снапшоты статов (diff до/после примерки) ─────────────────────────────
+    // Одна сессия IPC = один клиент (токен), хранилище на процесс.
+    // Стираются при открытии/импорте другого билда — diff между билдами не имеет смысла.
+    private static readonly Dictionary<string, Dictionary<string, object?>> _statSnapshots = new();
+
+    private static void ClearStatSnapshots() => _statSnapshots.Clear();
+
+    private static object StatsSnapshot(string body)
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.Build is not { } build) return new { error = "Build not loaded yet." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body ?? "{}") ?? new();
+        var name = req.TryGetValue("name", out var n) && n.ValueKind == JsonValueKind.String &&
+                   !string.IsNullOrWhiteSpace(n.GetString())
+            ? n.GetString()! : "last";
+        _statSnapshots[name] = new Dictionary<string, object?>(build.AllStats);
+        return new { ok = true, name, keyCount = build.AllStats.Count };
+    }
+
+    private static object StatsDiffHandler(string query)
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.Build is not { } build) return new { error = "Build not loaded yet." };
+        string? Param(string key)
+        {
+            foreach (var part in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var kv = part.Split('=', 2);
+                if (kv.Length == 2 && kv[0] == key)
+                    return Uri.UnescapeDataString(kv[1]);
+            }
+            return null;
+        }
+        var fromName = Param("from") ?? "last";
+        if (!_statSnapshots.TryGetValue(fromName, out var before))
+            return new
+            {
+                error = $"No snapshot '{fromName}'. Call POST /stats/snapshot first.",
+                available = _statSnapshots.Keys.OrderBy(k => k).ToArray(),
+            };
+        var toName = Param("to");
+        IReadOnlyDictionary<string, object?> after = toName is null
+            ? build.AllStats
+            : _statSnapshots.TryGetValue(toName, out var snap)
+                ? snap
+                : new Dictionary<string, object?>();   // неизвестное имя to → пусто → всё removed
+        if (toName is not null && after.Count == 0)
+            return new
+            {
+                error = $"No snapshot '{toName}'.",
+                available = _statSnapshots.Keys.OrderBy(k => k).ToArray(),
+            };
+        var diff = StatsDiff.Compute(before, after);
+        return new
+        {
+            ok   = true,
+            from = fromName,
+            to   = toName ?? "current",
+            changed = diff.Changed.Select(c => new { key = c.Key, from = c.From, to = c.To }).ToArray(),
+            added   = diff.Added.Select(c => new { key = c.Key, to = c.To }).ToArray(),
+            removed = diff.Removed.ToArray(),
+        };
+    }
+
     private static object GetStatsFiltered(string query)
     {
         if (BuildPageOrError(out var err) is not { } bp) return err;
@@ -2151,6 +2447,57 @@ public sealed class IpcServer
         if (bp.Build is not { } build) return new { error = "Build not loaded yet." };
         var xml = build.SaveBuildToXml();
         return xml is null ? new { error = "SaveBuildToXml returned null." } : new { ok = true, xml };
+    }
+
+    /// <summary>Импорт XML или PoB share code в живое приложение: LoadBuildFromXml +
+    /// рефреш вкладок. save:false (по умолчанию) — билд только в памяти, файл
+    /// пользователя не перезаписывается; снапшоты статов стираются.</summary>
+    private static async Task<object> BuildImport(string body)
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.Build is not { } build) return new { error = "Build not loaded yet." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        string? xml = null;
+        string? name = null;
+        var save = false;
+        if (req.TryGetValue("xml", out var x) && x.ValueKind == JsonValueKind.String)
+            xml = x.GetString();
+        else if (req.TryGetValue("code", out var c) && c.ValueKind == JsonValueKind.String)
+            xml = PBLEngine.BuildCodec.Decode(c.GetString() ?? "");
+        if (req.TryGetValue("name", out var n) && n.ValueKind == JsonValueKind.String)
+            name = n.GetString();
+        if (req.TryGetValue("save", out var s))
+            save = s.ValueKind == JsonValueKind.True ||
+                   (s.ValueKind == JsonValueKind.String && s.GetString() == "true");
+        if (string.IsNullOrWhiteSpace(xml))
+            return new { error = "Provide 'xml' (build XML text) or 'code' (PoB share code)." };
+        if (!xml.Contains("<PathOfBuilding"))
+            return new { error = "Payload does not look like a PoB build XML (<PathOfBuilding missing). " +
+                                 "For share codes pass them as 'code'." };
+
+        build.LoadBuildFromXml(xml, string.IsNullOrWhiteSpace(name) ? "Imported Build" : name);
+        bp.RefreshAfterImport();   // включая TreeTab — иначе /tree/allocated вернёт прежнее дерево
+        ClearStatSnapshots();   // снапшоты принадлежали прежнему билду
+        if (save)
+            await bp.SaveNow();
+        return new { ok = true, name = string.IsNullOrWhiteSpace(name) ? "Imported Build" : name, saved = save };
+    }
+
+    /// <summary>Свод предупреждений билда: несходящиеся атрибуты, отрицательные
+    /// пулы, cost-предупреждения, itemWarnings, отключённые скилы, бюджет очков.
+    /// Запускать после мутаций шмота/дерева — иначе агент не узнает, что сломал.</summary>
+    private static object BuildValidate()
+    {
+        var host = ItemDataHost();
+        if (host is null) return new { error = "No build page open or engine not ready." };
+        var v = host.GetBuildValidation();
+        return new
+        {
+            ok             = true,
+            points         = PointsPayload(v.Points),
+            warnings       = v.Issues.Select(i => new { code = i.Code, message = i.Message, source = i.Source }).ToArray(),
+            disabledSkills = v.DisabledSkills.Select(d => new { group = d.GroupIndex, gem = d.GemName, reason = d.Reason }).ToArray(),
+        };
     }
 
     private static object NotesGet()

@@ -1,5 +1,6 @@
 using ModelContextProtocol.Server;
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
@@ -430,11 +431,35 @@ public class VisualTools
     }
 
     [McpServerTool]
+    [Description(
+        "Switch the active weapon set (I or II). Affects which skill groups are counted " +
+        "(groups bound via visual_skills_set_group weaponSet) and which weapon's numbers the " +
+        "calc shows. The other set's gem groups keep working when you switch back.")]
+    public async Task<string> VisualItemsSelectWeaponSet(
+        [Description("Weapon set: 1 or 2.")] int set)
+    {
+        try { return await IpcClient.CallAsync("POST", "/items/select-weapon-set", new { set }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
     [Description("Set item Quality (0-30%).")]
     public async Task<string> VisualItemsEditorSetQuality(
         [Description("Quality percentage 0-30.")] int quality)
     {
         try { return await IpcClient.CallAsync("POST", "/items/editor-set-quality", new { quality }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Set the item's level (item level, 1-100) in the editor. Affix tiers with tier level " +
+        "above the item level cannot be added (visual_item_affixes shows each tier's 'level') — " +
+        "set a realistic level before crafting a tryout item, otherwise tiers silently vanish.")]
+    public async Task<string> VisualItemsEditorSetItemLevel(
+        [Description("Item level 1-100.")] int level)
+    {
+        try { return await IpcClient.CallAsync("POST", "/items/editor-set-item-level", new { level }); }
         catch (Exception ex) { return Error(ex); }
     }
 
@@ -672,9 +697,11 @@ public class VisualTools
         "over-budget is allowed like the UI; response carries overBudget + points.")]
     public async Task<string> VisualTreeAllocatePath(
         [Description("Numeric passive-tree node id to allocate.")] int nodeId,
-        [Description("Attribute for '+5 to any attribute' path nodes: 'str', 'dex' or 'int'. Null = engine default.")] string? attribute = null)
+        [Description("Attribute for '+5 to any attribute' path nodes: 'str', 'dex' or 'int'. Null = engine default.")] string? attribute = null,
+        [Description("Allocate as weapon set points: 1 or 2. Default 0 = shared points. " +
+            "Budget per set is in visual_tree_allocated points.weaponSetMax.")] int weaponSet = 0)
     {
-        try { return await IpcClient.CallAsync("POST", "/tree/allocate-path", new { nodeId, attribute }); }
+        try { return await IpcClient.CallAsync("POST", "/tree/allocate-path", new { nodeId, attribute, weaponSet }); }
         catch (Exception ex) { return Error(ex); }
     }
 
@@ -683,9 +710,10 @@ public class VisualTools
         "Refund one allocated passive node. Fails with the dependents list when other " +
         "allocated nodes rely on it for tree connectivity.")]
     public async Task<string> VisualTreeDeallocateNode(
-        [Description("Numeric node id to refund.")] int nodeId)
+        [Description("Numeric node id to refund.")] int nodeId,
+        [Description("Refund from weapon set 1/2 (node must belong to that set). Default 0 = shared node.")] int weaponSet = 0)
     {
-        try { return await IpcClient.CallAsync("POST", "/tree/deallocate-node", new { nodeId }); }
+        try { return await IpcClient.CallAsync("POST", "/tree/deallocate-node", new { nodeId, weaponSet }); }
         catch (Exception ex) { return Error(ex); }
     }
 
@@ -810,9 +838,18 @@ public class VisualTools
         [Description("Group index.")] int group,
         [Description("Enable/disable the whole group.")] bool? enabled = null,
         [Description("Include the group's damage in Full DPS.")] bool? includeInFullDps = null,
-        [Description("Custom group label.")] string? label = null)
+        [Description("Custom group label.")] string? label = null,
+        [Description("Bind the group to weapon set: 1 or 2 (group only counts while that set is " +
+            "active — see visual_items_select_weapon_set). 0 = unbind (always counted). " +
+            "Omitted = leave the binding unchanged.")] int? weaponSet = null)
     {
-        try { return await IpcClient.CallAsync("POST", "/skills/set-group", new { group, enabled, includeInFullDps, label }); }
+        try
+        {
+            object payload = weaponSet is null
+                ? new { group, enabled, includeInFullDps, label }
+                : new { group, enabled, includeInFullDps, label, weaponSet };
+            return await IpcClient.CallAsync("POST", "/skills/set-group", payload);
+        }
         catch (Exception ex) { return Error(ex); }
     }
 
@@ -830,6 +867,104 @@ public class VisualTools
     public async Task<string> VisualSkillsTooltips()
     {
         try { return await IpcClient.CallAsync("GET", "/skills/tooltips"); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "DPS breakdown: per-skill contributions to Full DPS (name, dps, count, total), " +
+        "combined fullDps, main-skill totalDps, and every skill group with isMain / " +
+        "includeInFullDps flags. Read-only. A group is missing from 'skills'? Set its " +
+        "includeInFullDps with visual_skills_set_group and call this again.")]
+    public async Task<string> VisualSkillsDps()
+    {
+        try { return await IpcClient.CallAsync("GET", "/skills/dps"); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Search the application's own gem catalogue (active and support gems that exist in its " +
+        "game data): name, tags, attribute requirements, max level, mana cost, weapon requirements, " +
+        "description. Use BEFORE visual_skills_add_group/add_gem — the app only accepts exact " +
+        "catalogue names, so resolve names here, not from memory. Filters combine; without filters " +
+        "returns up to 400 gems (truncated=true means narrow the query).")]
+    public async Task<string> VisualGemsList(
+        [Description("Substring on gem name or tag string, e.g. 'Fire'.")] string? query = null,
+        [Description("'active' or 'support'.")] string? type = null,
+        [Description("Substring on a tag, e.g. 'minion', 'projectile'.")] string? tag = null,
+        [Description("Substring on weapon requirements, e.g. 'Bow'.")] string? weapon = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/gem-catalog", new { query, type, tag, weapon }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Full tooltip of a (not necessarily equipped) gem by exact name: level, cost, " +
+        "reservation, cooldown, per-gem description. Use visual_gems_list first to resolve the name.")]
+    public async Task<string> VisualGemTooltip(
+        [Description("Exact gem name from visual_gems_list, e.g. 'Fireball'.")] string gemName,
+        [Description("Gem level for cost/reservation numbers. Default 20.")] int level = 20)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/gem-tooltip", new { gemName, level }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Load someone else's build into the running app: either build XML text ('xml') or a " +
+        "PoB share code from poe.ninja/forums ('code'). Becomes the CURRENT build in memory; " +
+        "save:true overwrites the user's current build file (default false — use visual_build_save " +
+        "or save:true explicitly). Stats snapshots are cleared on import.")]
+    public async Task<string> VisualBuildImport(
+        [Description("Build XML text.")] string? xml = null,
+        [Description("PoB share code (base64url zlib), e.g. from poe.ninja.")] string? code = null,
+        [Description("Build name. Default 'Imported Build'.")] string? name = null,
+        [Description("Overwrite the current build file on disk. Default false.")] bool save = false)
+    {
+        try { return await IpcClient.CallAsync("POST", "/build/import", new { xml, code, name, save }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Validate the current build: unmet attribute requirements, negative unreserved " +
+        "Life/Mana/Spirit, skills the pool can't afford, engine item warnings (jewels, " +
+        "sockets), disabled skills (e.g. weapon-usable mismatch) and passive/ascendancy/" +
+        "weapon-set point budget. Run AFTER gear/tree/gem mutations — warnings only show " +
+        "here, the app UI does not block anything.")]
+    public async Task<string> VisualBuildValidate()
+    {
+        try { return await IpcClient.CallAsync("GET", "/build/validate"); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Snapshot current stats (build.AllStats) under a name (default 'last'). " +
+        "Call before a tryout (equip an item, allocate nodes), change something, then " +
+        "visual_stats_diff — much cheaper than comparing full stat dumps by hand. " +
+        "Snapshots are cleared when another build is opened/imported.")]
+    public async Task<string> VisualStatsSnapshot(
+        [Description("Snapshot name. Default 'last'.")] string? name = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/stats/snapshot", new { name }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Diff stats against a snapshot: changed/added/removed keys with values. " +
+        "Compares to current stats unless 'to' names another snapshot.")]
+    public async Task<string> VisualStatsDiff(
+        [Description("Snapshot made earlier. Default 'last'.")] string? from = null,
+        [Description("Other snapshot to compare against. Default: current stats.")] string? to = null)
+    {
+        try
+        {
+            var q = new List<string>();
+            if (!string.IsNullOrEmpty(from)) q.Add($"from={Uri.EscapeDataString(from)}");
+            if (!string.IsNullOrEmpty(to)) q.Add($"to={Uri.EscapeDataString(to)}");
+            return await IpcClient.CallAsync("GET", "/stats/diff" + (q.Count > 0 ? "?" + string.Join("&", q) : ""));
+        }
         catch (Exception ex) { return Error(ex); }
     }
 
