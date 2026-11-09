@@ -133,11 +133,13 @@ spawnWeight, это просто поле существующего ответ�
   name ?? текущее имя); Refresh вкладок; save → bp.SaveNow().
 - MCP `visual_build_import {xml|code, name?, save?}`; снапшоты сбрасываются.
 
-### P6. spawnWeight в афиксах
-- AffixEntry += `SpawnWeight` (int; в PoE2-данных 0/1 — spawn-маска);
-  заполнение в GetItemAffixes (wv уже вычислен), поле в ItemAffixEntry.
-- docs/mcp.md: честно — распределения тиров в данных нет, для реализма:
-  spawnWeight>0 + tier level ≤ ilvl.
+### P6. spawnWeight в афиксах — СНЯТ при планировании
+Разведка при планировании показала: `GetItemAffixes` уже фильтрует пул по
+spawn-маске (`weightVal > 0`, LuaHost.cs:2013-2015), а в PoE2-датасете
+`weightVal` бинарный — поле spawnWeight было бы константой 1. Реалистичность
+крафта обеспечивают: (а) pre-filtered пул (все перечисленные афиксы могут
+выпасть на базе) и (б) гейт `tier Level ≤ ilvl` из P7. Отражено в docs/mcp.md
+(заметка «Крафт реалистичных предметов»).
 
 ### P7. Item level
 - IPC `POST /items/editor-set-item-level {level}` (clamp 1..100).
