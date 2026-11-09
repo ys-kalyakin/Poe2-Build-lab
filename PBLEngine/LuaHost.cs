@@ -235,7 +235,7 @@ public sealed partial class LuaHost : IDisposable
                     sourceLabel = strip(group.sourceItem.name or group.sourceItem.title or '')
                 end
                 local incFull = group.includeInFullDPS and 1 or 0
-                table.insert(out, { i, name, strip(group.label or ''), enabled, isTrigger, source, sourceLabel, incFull })
+                table.insert(out, { i, name, strip(group.label or ''), enabled, isTrigger, source, sourceLabel, incFull, group.slot })
             end
             return out
         ");
@@ -252,7 +252,8 @@ public sealed partial class LuaHost : IDisposable
                 var source      = row[6L] as string ?? "";
                 var sourceLabel = row[7L] as string ?? "";
                 var incFull     = row[8L] is long inc && inc == 1L;
-                groups.Add(new SkillGroupEntry(idx, name, label, enabled, isTrigger, source, sourceLabel, incFull));
+                var slot        = row[9L] as string;
+                groups.Add(new SkillGroupEntry(idx, name, label, enabled, isTrigger, source, sourceLabel, incFull, slot));
             }
         }
         return groups;
@@ -3044,6 +3045,59 @@ public sealed partial class LuaHost : IDisposable
             foreach (var k in tbl.Keys)
                 if (tbl[k] is long al) set.Add((int)al);
         return set;
+    }
+
+    /// <summary>Режим аллокации дерева: 0 — общий, 1/2 — weapon set 1/2
+    /// (Lua spec.allocMode). Аллокация в режимах 1/2 помечает узлы
+    /// node.allocMode и считается из отдельного weapon-set пула очков.</summary>
+    public void SetAllocMode(int mode)
+    {
+        if (mode is < 0 or > 2)
+            throw new ArgumentOutOfRangeException(nameof(mode), mode, "allocMode is 0 (shared), 1 or 2 (weapon set).");
+        State["_allocMode"] = (long)mode;
+        State.DoString("if build and build.spec then build.spec.allocMode = _allocMode end");
+        State["_allocMode"] = null;
+    }
+
+    /// <summary>Карта принадлежности аллоцированных узлов: nodeId → allocMode
+    /// (0 общий, 1/2 — weapon set). Двух узлов с одним id не бывает.</summary>
+    public Dictionary<int, int> GetAllocatedNodeModes()
+    {
+        var dict = new Dictionary<int, int>();
+        var result = State.DoString(@"
+            if not (build and build.spec) then return nil end
+            local modes = {}
+            for id, node in pairs(build.spec.allocNodes or {}) do
+                modes[#modes+1] = {tonumber(id), node.allocMode or 0}
+            end
+            return modes
+        ");
+        if (result is { Length: > 0 } && result[0] is LuaTable tbl)
+            foreach (var k in tbl.Keys)
+                if (tbl[k] is LuaTable row && row[1L] is { } idv && row[2L] is { } mv)
+                    dict[Convert.ToInt32(idv)] = Convert.ToInt32(mv);
+        return dict;
+    }
+
+    /// <summary>Привязка скил-группы к weapon set через slot: "Weapon 1" (set 1),
+    /// "Weapon 1 Swap" (set 2), null — снять (группа активна всегда/по слоту).
+    /// Расчёт учитывает группу, когда slot.weaponSet совпадает с активным сетом
+    /// (CalcSetup.lua:1729).</summary>
+    public void SetGroupSlot(int groupIndex, string? slot)
+    {
+        State["_grpIdx"]  = (long)groupIndex;
+        State["_grpSlot"] = slot;
+        State.DoString(@"
+            if not (build and build.skillsTab) then return end
+            local group = build.skillsTab.socketGroupList[_grpIdx]
+            if not group then return end
+            group.slot = _grpSlot
+            if group.slot == '' then group.slot = nil end
+            build.skillsTab:ProcessSocketGroup(group)
+        ");
+        State["_grpIdx"]  = null;
+        State["_grpSlot"] = null;
+        TriggerRecalc();
     }
 
     /// <summary>Single round-trip variant of <see cref="GetAllocatedNodeIds"/>

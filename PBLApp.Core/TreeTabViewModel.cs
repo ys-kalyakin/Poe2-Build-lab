@@ -581,7 +581,7 @@ public partial class TreeTabViewModel : ViewModelBase
     /// reconciled against Lua truth before returning: <see cref="TreeAllocateOutcome.Failed"/>
     /// lists nodes the engine refused, <see cref="TreeAllocateOutcome.PointsSpent"/>
     /// counts what actually took. Never refuses on budget.</summary>
-    public async Task<TreeAllocateOutcome> AllocatePathTo(int nodeId, string? attribute = null)
+    public async Task<TreeAllocateOutcome> AllocatePathTo(int nodeId, string? attribute = null, int weaponSet = 0)
     {
         var byId = _nodeIndex ??= Nodes.ToDictionary(n => n.Id);
         var path = TreePathFinder.FindPath(byId, AllocatedIds, nodeId);
@@ -589,6 +589,9 @@ public partial class TreeTabViewModel : ViewModelBase
             return new TreeAllocateOutcome(
                 false, $"unreachable: node {nodeId} is not linked to the allocated tree",
                 [], [], [], 0, _pointUsage);
+        if (weaponSet is < 0 or > 2)
+            return new TreeAllocateOutcome(
+                false, "weaponSet is 0 (shared), 1 or 2 (weapon set)", [], [], [], 0, _pointUsage);
 
         int wanted = attribute?.ToLowerInvariant() switch
         {
@@ -596,22 +599,32 @@ public partial class TreeTabViewModel : ViewModelBase
             _     => 0,
         };
 
+        // Аллокация в weapon set: ставим spec.allocMode на время операции,
+        // движок помечает узлы node.allocMode и считает их из weapon-set пула.
         var attrNodes = new List<int>();
-        foreach (var id in path)
+        if (weaponSet > 0) _host.SetAllocMode(weaponSet);
+        try
         {
-            if (byId[id].IsAttribute) attrNodes.Add(id);
-            int? idx = byId[id].IsAttribute && wanted > 0 ? wanted : null;
+            foreach (var id in path)
+            {
+                if (byId[id].IsAttribute) attrNodes.Add(id);
+                int? idx = byId[id].IsAttribute && wanted > 0 ? wanted : null;
 
-            var set = new HashSet<int>(AllocatedIds);
-            set.Add(id);
-            AllocatedIds = set;
+                var set = new HashSet<int>(AllocatedIds);
+                set.Add(id);
+                AllocatedIds = set;
 
-            Interlocked.Increment(ref _pendingToggles);
-            IsToggleBusy = true;
-            await RunBackgroundToggle(id, allocate: true, idx);
+                Interlocked.Increment(ref _pendingToggles);
+                IsToggleBusy = true;
+                await RunBackgroundToggle(id, allocate: true, idx);
+            }
+
+            await WaitForEngineSettledAsync();
         }
-
-        await WaitForEngineSettledAsync();
+        finally
+        {
+            if (weaponSet > 0) _host.SetAllocMode(0);
+        }
 
         // Reconcile the claim against engine truth: AllocNode can refuse a node
         // (already allocated, no path, unlock constraints) and return 0 silently.
@@ -623,11 +636,23 @@ public partial class TreeTabViewModel : ViewModelBase
     }
 
     /// <summary>Refunds a single allocated node. Refuses when other allocated
-    /// nodes would be orphaned (they depend on this node for connectivity).</summary>
-    public async Task<(bool Ok, string? Error, int[] Dependents)> DeallocateNode(int nodeId)
+    /// nodes would be orphaned (they depend on this node for connectivity).
+    /// weaponSet 1/2: refunds a node allocated in that weapon set; shared
+    /// (allocMode 0) nodes are refused — same guard as the UI.</summary>
+    public async Task<(bool Ok, string? Error, int[] Dependents)> DeallocateNode(int nodeId, int weaponSet = 0)
     {
         if (!AllocatedIds.Contains(nodeId))
             return (false, $"node {nodeId} is not allocated", []);
+        if (weaponSet is < 0 or > 2)
+            return (false, "weaponSet is 0 (shared), 1 or 2 (weapon set)", []);
+        if (weaponSet > 0)
+        {
+            var nodeMode = _host.GetAllocatedNodeModes().TryGetValue(nodeId, out var m) ? m : 0;
+            if (nodeMode == 0)
+                return (false,
+                    $"node {nodeId} is a shared node (allocMode 0) and cannot be deallocated from weapon set {weaponSet}",
+                    []);
+        }
 
         var dependents = DependentsOf(nodeId);
         if (dependents.Length > 0)
@@ -639,9 +664,17 @@ public partial class TreeTabViewModel : ViewModelBase
         set.Remove(nodeId);
         AllocatedIds = set;
 
-        Interlocked.Increment(ref _pendingToggles);
-        IsToggleBusy = true;
-        await RunBackgroundToggle(nodeId, allocate: false);
+        if (weaponSet > 0) _host.SetAllocMode(weaponSet);
+        try
+        {
+            Interlocked.Increment(ref _pendingToggles);
+            IsToggleBusy = true;
+            await RunBackgroundToggle(nodeId, allocate: false);
+        }
+        finally
+        {
+            if (weaponSet > 0) _host.SetAllocMode(0);
+        }
         return (true, null, []);
     }
 

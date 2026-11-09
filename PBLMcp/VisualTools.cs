@@ -431,6 +431,18 @@ public class VisualTools
     }
 
     [McpServerTool]
+    [Description(
+        "Switch the active weapon set (I or II). Affects which skill groups are counted " +
+        "(groups bound via visual_skills_set_group weaponSet) and which weapon's numbers the " +
+        "calc shows. The other set's gem groups keep working when you switch back.")]
+    public async Task<string> VisualItemsSelectWeaponSet(
+        [Description("Weapon set: 1 or 2.")] int set)
+    {
+        try { return await IpcClient.CallAsync("POST", "/items/select-weapon-set", new { set }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
     [Description("Set item Quality (0-30%).")]
     public async Task<string> VisualItemsEditorSetQuality(
         [Description("Quality percentage 0-30.")] int quality)
@@ -685,9 +697,11 @@ public class VisualTools
         "over-budget is allowed like the UI; response carries overBudget + points.")]
     public async Task<string> VisualTreeAllocatePath(
         [Description("Numeric passive-tree node id to allocate.")] int nodeId,
-        [Description("Attribute for '+5 to any attribute' path nodes: 'str', 'dex' or 'int'. Null = engine default.")] string? attribute = null)
+        [Description("Attribute for '+5 to any attribute' path nodes: 'str', 'dex' or 'int'. Null = engine default.")] string? attribute = null,
+        [Description("Allocate as weapon set points: 1 or 2. Default 0 = shared points. " +
+            "Budget per set is in visual_tree_allocated points.weaponSetMax.")] int weaponSet = 0)
     {
-        try { return await IpcClient.CallAsync("POST", "/tree/allocate-path", new { nodeId, attribute }); }
+        try { return await IpcClient.CallAsync("POST", "/tree/allocate-path", new { nodeId, attribute, weaponSet }); }
         catch (Exception ex) { return Error(ex); }
     }
 
@@ -696,9 +710,10 @@ public class VisualTools
         "Refund one allocated passive node. Fails with the dependents list when other " +
         "allocated nodes rely on it for tree connectivity.")]
     public async Task<string> VisualTreeDeallocateNode(
-        [Description("Numeric node id to refund.")] int nodeId)
+        [Description("Numeric node id to refund.")] int nodeId,
+        [Description("Refund from weapon set 1/2 (node must belong to that set). Default 0 = shared node.")] int weaponSet = 0)
     {
-        try { return await IpcClient.CallAsync("POST", "/tree/deallocate-node", new { nodeId }); }
+        try { return await IpcClient.CallAsync("POST", "/tree/deallocate-node", new { nodeId, weaponSet }); }
         catch (Exception ex) { return Error(ex); }
     }
 
@@ -823,9 +838,18 @@ public class VisualTools
         [Description("Group index.")] int group,
         [Description("Enable/disable the whole group.")] bool? enabled = null,
         [Description("Include the group's damage in Full DPS.")] bool? includeInFullDps = null,
-        [Description("Custom group label.")] string? label = null)
+        [Description("Custom group label.")] string? label = null,
+        [Description("Bind the group to weapon set: 1 or 2 (group only counts while that set is " +
+            "active — see visual_items_select_weapon_set). 0 = unbind (always counted). " +
+            "Omitted = leave the binding unchanged.")] int? weaponSet = null)
     {
-        try { return await IpcClient.CallAsync("POST", "/skills/set-group", new { group, enabled, includeInFullDps, label }); }
+        try
+        {
+            object payload = weaponSet is null
+                ? new { group, enabled, includeInFullDps, label }
+                : new { group, enabled, includeInFullDps, label, weaponSet };
+            return await IpcClient.CallAsync("POST", "/skills/set-group", payload);
+        }
         catch (Exception ex) { return Error(ex); }
     }
 

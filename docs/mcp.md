@@ -67,12 +67,25 @@ dotnet build PBLMcp/PBLMcp.csproj -c Release
 видимого текста UI)
 
 ### Дерево — построение
-`visual_tree_allocated` — занятые узлы + бюджет очков и `overBudget` ·
+`visual_tree_allocated` — занятые узлы (+ `allocMode` каждого: 0 общий,
+1/2 — weapon set) + бюджет очков и `overBudget` ·
 `visual_tree_nodes` — поиск узлов по имени/статам (возвращает id для аллокации) ·
 `visual_tree_allocate_path` — проложить кратчайший путь до узла (атрибутивные
-узлы автоматически или `attribute: str/dex/int`) · `visual_tree_deallocate_node`
-— снять узел (откажет со списком зависимых) · `visual_tree_toggle_node` ·
-`visual_tree_node_text` — текст тултипов узлов · `visual_tree_set_search`
+узлы автоматически или `attribute: str/dex/int`; `weaponSet: 1|2` — очки
+weapon set'а, бюджет — `points.weaponSetMax`) · `visual_tree_deallocate_node`
+— снять узел (`weaponSet` для узлов сета; общие узлы из сета снять нельзя) ·
+`visual_tree_toggle_node` · `visual_tree_node_text` — текст тултипов узлов ·
+`visual_tree_set_search`
+
+### Weapon set'ы (PoE2)
+Бюджеты: `visual_tree_allocated` → `points.weaponSet1Used/2Used/weaponSetMax`.
+Аллокация в сет: `visual_tree_allocate_path {..., weaponSet: 1}` (узлы
+помечаются и считаются из отдельного пула). Активный сет:
+`visual_items_select_weapon_set {set}` — определяет, какие привязанные
+скил-группы считаются. Привязка групп: `visual_skills_set_group {...,
+weaponSet: 1|2}` (0 — снять; в `visual_skills_list` видна в поле `slot`).
+⚠️ Дальний путь в сет через jewel socket движок может прунить (сокет — общий
+узел): аллоцируй в сет от смежной территории.
 
 ### Дерево — просмотр и анализ
 `visual_tree_state` · `visual_tree_select_class` ·

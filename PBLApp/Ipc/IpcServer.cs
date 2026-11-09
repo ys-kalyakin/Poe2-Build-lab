@@ -134,6 +134,7 @@ public sealed class IpcServer
                 "/open-build"    => await OnUi(() => OpenBuild(body)),
                 "/go-back"       => await OnUi(GoBack),
                 "/items/state"        => await OnUi(ItemsState),
+                "/items/select-weapon-set" => await OnUi(() => ItemsSelectWeaponSet(body)),
                 "/items/select-slot"  => await OnUi(() => ItemsSelectSlot(body)),
                 "/items/select-pool"  => await OnUi(() => ItemsSelectPool(body)),
                 "/items/equip"        => await OnUi(() => ItemsEquip(body)),
@@ -484,6 +485,23 @@ public sealed class IpcServer
         v.Flask1, v.Flask2, v.Charm1, v.Charm2, v.Charm3,
         v.Arm1, v.Arm2, v.Leg1, v.Leg2 ];
 
+    /// <summary>Переключение активного weapon set (Weapon Set I / II) — влияет на
+    /// то, какие скил-группы считаются (slot.weaponSet) и какие цифры показывает
+    /// расчёт. set: 1 или 2.</summary>
+    private static object ItemsSelectWeaponSet(string body)
+    {
+        if (GetItemsVm() is not { } v) return new { error = "ItemsTab not ready." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("set", out var s) || s.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'set' (1 or 2)." };
+        var set = s.GetInt32();
+        if (set is not (1 or 2))
+            return new { error = $"Invalid weapon set {set}. Allowed: 1, 2." };
+        if (set == 1) v.SelectWeaponSet1Command.Execute(null);
+        else v.SelectWeaponSet2Command.Execute(null);
+        return new { ok = true, weaponSet = set, isWeaponSwapActive = set == 2 };
+    }
+
     private static object ItemsState()
     {
         if (GetItemsVm() is not { } v) return new { error = "ItemsTab not ready." };
@@ -792,16 +810,23 @@ public sealed class IpcServer
     private static object SkillsListing(SkillsTabViewModel v) => new
     {
         ok = true,
-        groups = v.Groups.Select(g => new
+        isWeaponSwapActive = ItemDataHost()?.IsWeaponSwapActive() ?? false,
+        groups = v.Groups.Select(g =>
         {
-            index            = g.Index,
-            name             = g.ActiveGemName,
-            isMain           = g.IsMain,
-            enabled          = g.IsEnabled,
-            includeInFullDps = g.IncludeInFullDps,
-            isGranted        = g.IsGranted,
-            sourceLabel      = g.SourceLabel,
-            gems             = SkillGemList(g),
+            // slot из движка (weapon set привязка через group.slot)
+            var entry = ItemDataHost()?.GetSkillGroups().FirstOrDefault(e => e.Index == g.Index);
+            return new
+            {
+                index            = g.Index,
+                name             = g.ActiveGemName,
+                isMain           = g.IsMain,
+                enabled          = g.IsEnabled,
+                includeInFullDps = g.IncludeInFullDps,
+                isGranted        = g.IsGranted,
+                sourceLabel      = g.SourceLabel,
+                slot             = entry?.Slot,
+                gems             = SkillGemList(g),
+            };
         }).ToArray(),
     };
 
@@ -1064,6 +1089,17 @@ public sealed class IpcServer
             v.SyncGroupIncludeInFullDps(grp.Index, fe.GetBoolean());
         if (req.TryGetValue("label", out var lb) && lb.ValueKind == JsonValueKind.String)
             v.SetGroupLabel(grp.Index, lb.GetString() ?? "");
+        // Привязка группы к weapon set: 1/2 → slot "Weapon 1"/"Weapon 1 Swap",
+        // 0 — снять привязку (CalcSetup считает группу по slot.weaponSet).
+        if (req.TryGetValue("weaponSet", out var wse))
+        {
+            var ws = wse.ValueKind == JsonValueKind.Number ? wse.GetInt32()
+                   : wse.ValueKind == JsonValueKind.True ? 1 : 0;
+            if (ws is < 0 or > 2)
+                return new { error = "weaponSet is 0 (none), 1 or 2 (weapon set)." };
+            var host = ItemDataHost();
+            host?.SetGroupSlot(grp.Index, ws switch { 1 => "Weapon 1", 2 => "Weapon 1 Swap", _ => null });
+        }
 
         v.Refresh();
         return SkillsListing(v);
@@ -1744,12 +1780,15 @@ public sealed class IpcServer
         if (GetTreeVm() is not { } t) return new { error = "TreeTab not ready." };
         var alloc = t.AllocatedIds.OrderBy(x => x).ToArray();
         var byId  = t.Nodes.ToDictionary(n => n.Id);
+        // Принадлежность узла к weapon set: 0 — общий, 1/2 — weapon set.
+        var modes = ItemDataHost()?.GetAllocatedNodeModes() ?? new Dictionary<int, int>();
         var nodes = alloc.Where(byId.ContainsKey).Select(id => new
         {
             id,
             name       = byId[id].Name,
             type       = byId[id].Type,
             ascendancy = byId[id].AscendancyName,
+            allocMode  = modes.TryGetValue(id, out var m) ? m : 0,
         }).ToArray();
         var usage = t.PointUsage;
         return new
@@ -1771,8 +1810,10 @@ public sealed class IpcServer
         string? attribute = req.TryGetValue("attribute", out var a) && a.ValueKind == JsonValueKind.String
             ? a.GetString()
             : null;
+        int weaponSet = req.TryGetValue("weaponSet", out var w) && w.ValueKind == JsonValueKind.Number
+            ? w.GetInt32() : 0;
 
-        var r = await t.AllocatePathTo(n.GetInt32(), attribute);
+        var r = await t.AllocatePathTo(n.GetInt32(), attribute, weaponSet);
         await t.WaitForEngineSettledAsync();   // idempotent; AllocatePathTo settles internally
         var usage = t.PointUsage;
         return new
@@ -1794,8 +1835,10 @@ public sealed class IpcServer
         var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
         if (!req.TryGetValue("nodeId", out var n) || n.ValueKind != JsonValueKind.Number)
             return new { error = "Missing 'nodeId'." };
+        int weaponSet = req.TryGetValue("weaponSet", out var w) && w.ValueKind == JsonValueKind.Number
+            ? w.GetInt32() : 0;
 
-        var (ok, error, dependents) = await t.DeallocateNode(n.GetInt32());
+        var (ok, error, dependents) = await t.DeallocateNode(n.GetInt32(), weaponSet);
         await t.WaitForEngineSettledAsync();
         return new { ok, error, dependents };
     }
