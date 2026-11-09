@@ -557,11 +557,15 @@ public partial class TreeTabViewModel : ViewModelBase
     // auto-pick or take an explicit index) and callers can await engine truth.
 
     /// <summary>Result of an agent-driven path allocation. Budget over-runs are
-    /// allowed (same as the UI) — check <see cref="Usage"/> for the truth.</summary>
+    /// allowed (same as the UI) — check <see cref="Usage"/> for the truth.
+    /// <see cref="Path"/> is what was requested, <see cref="Failed"/> is the
+    /// part the engine refused (empty on success): the outcome is reconciled
+    /// engine truth, not a prediction.</summary>
     public record TreeAllocateOutcome(
         bool Ok,
         string? Error,
         List<int> Path,
+        List<int> Failed,
         List<int> AttributeNodes,
         int PointsSpent,
         PointUsage? Usage);
@@ -573,9 +577,10 @@ public partial class TreeTabViewModel : ViewModelBase
     /// <summary>Allocates the shortest path from the allocated tree to
     /// <paramref name="nodeId"/>, node by node, awaiting the engine each step.
     /// Attribute nodes on the path pick <paramref name="attribute"/>
-    /// ("str"/"dex"/"int") or the engine default when null. Returns the path
-    /// (tree-outward), which attribute nodes it hit and the point usage —
-    /// never refuses on budget.</summary>
+    /// ("str"/"dex"/"int") or the engine default when null. The outcome is
+    /// reconciled against Lua truth before returning: <see cref="TreeAllocateOutcome.Failed"/>
+    /// lists nodes the engine refused, <see cref="TreeAllocateOutcome.PointsSpent"/>
+    /// counts what actually took. Never refuses on budget.</summary>
     public async Task<TreeAllocateOutcome> AllocatePathTo(int nodeId, string? attribute = null)
     {
         var byId = _nodeIndex ??= Nodes.ToDictionary(n => n.Id);
@@ -583,7 +588,7 @@ public partial class TreeTabViewModel : ViewModelBase
         if (path.Count == 0)
             return new TreeAllocateOutcome(
                 false, $"unreachable: node {nodeId} is not linked to the allocated tree",
-                [], [], 0, _pointUsage);
+                [], [], [], 0, _pointUsage);
 
         int wanted = attribute?.ToLowerInvariant() switch
         {
@@ -606,7 +611,15 @@ public partial class TreeTabViewModel : ViewModelBase
             await RunBackgroundToggle(id, allocate: true, idx);
         }
 
-        return new TreeAllocateOutcome(true, null, path, attrNodes, path.Count, _pointUsage);
+        await WaitForEngineSettledAsync();
+
+        // Reconcile the claim against engine truth: AllocNode can refuse a node
+        // (already allocated, no path, unlock constraints) and return 0 silently.
+        var failed = path.Where(id => !AllocatedIds.Contains(id)).ToList();
+        var took   = path.Where(AllocatedIds.Contains).ToList();
+        return new TreeAllocateOutcome(
+            failed.Count == 0, failed.Count > 0 ? "some path nodes were not allocated by the engine" : null,
+            path, failed, attrNodes, took.Count, _pointUsage);
     }
 
     /// <summary>Refunds a single allocated node. Refuses when other allocated

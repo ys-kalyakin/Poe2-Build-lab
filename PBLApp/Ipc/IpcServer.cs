@@ -1592,13 +1592,14 @@ public sealed class IpcServer
             : null;
 
         var r = await t.AllocatePathTo(n.GetInt32(), attribute);
-        await t.WaitForEngineSettledAsync();   // engine truth before answering
+        await t.WaitForEngineSettledAsync();   // idempotent; AllocatePathTo settles internally
         var usage = t.PointUsage;
         return new
         {
             ok             = r.Ok,
             error          = r.Error,
             path           = r.Path,
+            failed         = r.Failed,
             attributeNodes = r.AttributeNodes,
             pointsSpent    = r.PointsSpent,
             points         = PointsPayload(usage),
@@ -2076,6 +2077,11 @@ public sealed class IpcServer
                 opt.SelectedItem = item;           // setter applies via SetConfigValue
                 break;
             default:
+                // Numeric option types gate on the invariant culture (Lua
+                // tonumber expects a dot) — reject up front so {ok:true} never
+                // lies about a value the VM would silently drop.
+                if (opt.Type != "text" && !Core.ConfigValues.IsNumericInvariant(value))
+                    return new { error = $"option '{varName}' expects a number (dot decimal separator), got '{value}'." };
                 opt.TextValue = value;             // OnTextValueChanged applies (text as-is, numbers validated)
                 break;
         }

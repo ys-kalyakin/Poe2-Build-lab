@@ -60,17 +60,17 @@ public class VisualTools
 
             // The apphost resolves libhostfxr via DOTNET_ROOT (or PATH). MCP
             // host processes often have neither — probe the usual locations.
+            // Real .NET layouts nest the library under host/fxr/<version>/.
             if (!OperatingSystem.IsWindows() && string.IsNullOrEmpty(
                     psi.EnvironmentVariables["DOTNET_ROOT"]))
             {
                 foreach (var cand in new[]
                          {
-                             Environment.GetEnvironmentVariable("DOTNET_ROOT"),
                              "/usr/share/dotnet", "/usr/lib/dotnet",
                              Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dotnet"),
                          })
                 {
-                    if (!string.IsNullOrEmpty(cand) && File.Exists(Path.Combine(cand, "libhostfxr.so")))
+                    if (HasHostFxr(cand))
                     {
                         psi.EnvironmentVariables["DOTNET_ROOT"] = cand;
                         break;
@@ -946,6 +946,14 @@ public class VisualTools
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
+
+    /// <summary>True when <paramref name="root"/> looks like a .NET install the
+    /// apphost can resolve: host/fxr/&lt;version&gt;/libhostfxr.so exists.</summary>
+    private static bool HasHostFxr(string? root) =>
+        !string.IsNullOrEmpty(root) &&
+        Directory.Exists(Path.Combine(root, "host", "fxr")) &&
+        Directory.EnumerateDirectories(Path.Combine(root, "host", "fxr"))
+            .Any(d => File.Exists(Path.Combine(d, "libhostfxr.so")));
 
     private static string FindRepoRoot()
     {

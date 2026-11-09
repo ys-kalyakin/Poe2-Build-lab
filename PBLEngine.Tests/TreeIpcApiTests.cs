@@ -70,7 +70,11 @@ public class TreeIpcApiTests : IClassFixture<LuaHostFixture>
         Assert.True(result.Ok, result.Error);
         Assert.Equal(path, result.Path);
         Assert.All(path, id => Assert.Contains(id, _vm.AllocatedIds));
-        Assert.Equal(path.Count, result.PointsSpent);
+        // Response claims must be reconciled engine truth, not predictions:
+        // every predicted node took, and PointsSpent counts what the engine
+        // actually allocated.
+        Assert.Empty(result.Failed);
+        Assert.Equal(path.Count(id => _vm.AllocatedIds.Contains(id)), result.PointsSpent);
     }
 
     [Fact]
