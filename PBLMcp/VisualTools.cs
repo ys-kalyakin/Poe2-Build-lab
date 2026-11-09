@@ -1006,6 +1006,70 @@ public class VisualTools
         catch (Exception ex) { return Error(ex); }
     }
 
+    // ── Item knowledge & prices (item-economy) ─────────────────────────────
+
+    [McpServerTool]
+    [Description(
+        "List base item types that exist in the game. Without 'category' returns all " +
+        "category names; with 'category' returns its bases (name, implicit mod, level " +
+        "requirement, type, rune socket count). Partial category match, error lists valid ones.")]
+    public async Task<string> VisualItemBases([Description("Category name, e.g. 'Wand', 'Helmet'. Optional.")] string? category = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/items/bases", new { category }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Full affix pool of a base type: every prefix/suffix with tier, value range, level " +
+        "and group, plus corruption affixes and runes. Use to plan crafting or to compare " +
+        "possible rare-item options without opening the editor. Exact base name required " +
+        "(error response suggests similar bases).")]
+    public async Task<string> VisualItemAffixes([Description("Base item name, e.g. 'Opal Wand'.")] string baseName)
+    {
+        try { return await IpcClient.CallAsync("POST", "/items/affixes", new { @base = baseName }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Search unique items that exist in the game by partial name/base/category. Returns " +
+        "name, base type and category. For their PRICES use visual_prices_uniques, not this.")]
+    public async Task<string> VisualItemUniques([Description("Substring to filter by. Empty = all.")] string? query = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/items/uniques", new { query }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Currency/exchange rates in divines from poe.ninja (cached 1h). type is one of: " +
+        "Currency, Fragments, Abyss, UncutGems, LineageSupportGems, Essences, SoulCores, " +
+        "Idols, Runes, RitualOmens, Expedition, Delirium, Breach, Verisium. Use to express " +
+        "a build budget in divines.")]
+    public async Task<string> VisualPricesCurrency(
+        [Description("Exchange type, default 'Currency'.")] string type = "Currency",
+        [Description("Substring filter by currency name. Optional.")] string? query = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/prices/currency", new { type, query }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Unique item prices from poe.ninja (cached 1h): price in divines, live listing count " +
+        "(liquidity), corrupted flag, mod texts. type is one of: UniqueWeapons, UniqueArmours, " +
+        "UniqueAccessories, UniqueFlasks, UniqueCharms, UniqueJewels, UniqueSanctumRelics, " +
+        "UniqueTablets, PrecursorTablets. For exact rare-item prices use the trader tools " +
+        "(visual_trader_open/search/state) instead — they need the user's trade login.")]
+    public async Task<string> VisualPricesUniques(
+        [Description("Stash type, default 'UniqueArmours'.")] string type = "UniqueArmours",
+        [Description("Substring filter by unique name or base. Optional.")] string? query = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/prices/uniques", new { type, query }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
     // ── Misc app-level wraps ───────────────────────────────────────────────
 
     [McpServerTool]
