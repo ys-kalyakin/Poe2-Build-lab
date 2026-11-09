@@ -8,6 +8,7 @@ using Avalonia.VisualTree;
 using PBLApp.Core;
 using PBLApp.Core.Localization;
 using PBLApp.ViewModels;
+using PBLEngine;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -177,7 +178,19 @@ public sealed class IpcServer
                 "/tree/pick-jewel"        => await OnUi(() => TreePickJewel(body)),
                 "/tree/power-build"       => await OnUiAsync(() => TreePowerBuild(body)),
                 "/tree/power-report"      => await OnUi(TreePowerReport),
+                "/tree/allocated"         => await OnUi(TreeAllocated),
+                "/tree/allocate-path"     => await OnUiAsync(() => TreeAllocatePath(body)),
+                "/tree/deallocate-node"   => await OnUiAsync(() => TreeDeallocateNode(body)),
+                "/tree/nodes"             => await OnUi(() => TreeNodes(body)),
                 "/skills/tooltips"        => await OnUi(SkillsTooltips),
+                "/skills/list"            => await OnUi(SkillsList),
+                "/skills/add-group"       => await OnUi(() => SkillsAddGroup(body)),
+                "/skills/remove-group"    => await OnUi(() => SkillsRemoveGroup(body)),
+                "/skills/add-gem"         => await OnUi(() => SkillsAddGem(body)),
+                "/skills/remove-gem"      => await OnUi(() => SkillsRemoveGem(body)),
+                "/skills/set-gem"         => await OnUi(() => SkillsSetGem(body)),
+                "/skills/set-group"       => await OnUi(() => SkillsSetGroup(body)),
+                "/skills/set-main"        => await OnUi(() => SkillsSetMain(body)),
                 "/skills/support-picker"          => await OnUi(() => SupportPickerState(body)),
                 "/skills/support-picker/set-tab"  => await OnUi(() => SupportPickerSetTab(body)),
                 "/skills/support-picker/set-mode" => await OnUi(() => SupportPickerSetMode(body)),
@@ -188,6 +201,14 @@ public sealed class IpcServer
                 "/character-import/open" => await OnUi(() => CharacterImportOpen(body)),
                 "/export/open"           => await OnUi(() => ImportExportOpen(body)),
                 "/build/update-from-game" => await OnUi(UpdateFromGame),
+                "/stats"         => await OnUi(() => GetStatsFiltered(ctx.Request.Url?.Query ?? "")),
+                "/build/save"    => await OnUiAsync(BuildSave),
+                "/build/xml"     => await OnUi(BuildXml),
+                "/notes"         => ctx.Request.HttpMethod == "POST"
+                                        ? await OnUi(() => NotesSet(body))
+                                        : await OnUi(NotesGet),
+                "/config/state"  => await OnUi(ConfigState),
+                "/config/set"    => await OnUi(() => ConfigSet(body)),
                 "/app/screens"           => await OnUi(ListScreens),
                 "/app/move-to-screen"    => await OnUi(() => MoveToScreen(body)),
                 "/trader/state"      => await OnUi(TraderState),
@@ -725,6 +746,194 @@ public sealed class IpcServer
             });
         }
         return new { ok = true, groups = groups.ToArray() };
+    }
+
+    // ── Skills CRUD (agent-facing) ─────────────────────────────────────────
+    // Addressing contract: engine 1-based group/gem indexes (group == the
+    // 'index' field of the listing, gem == 'gemIndex'). The engine re-indexes
+    // densely after every removal, so EVERY mutation response echoes a fresh
+    // listing — that echo is the only valid addressing for the next call.
+
+    private static object[] SkillGemList(SkillGroupViewModel g)
+    {
+        var gems = new List<object>();
+        void Add(GemViewModel? gem)
+        {
+            if (gem is null || gem.GemIndex <= 0) return;   // VM-side empty slots are not addressable
+            gems.Add(new
+            {
+                gemIndex  = gem.GemIndex,
+                name      = gem.CommittedName,
+                level     = (int)gem.Level,
+                quality   = (int)gem.Quality,
+                enabled   = gem.IsEnabled,
+                isSupport = gem.IsSupport,
+            });
+        }
+        Add(g.ActiveGem);
+        foreach (var s in g.SupportSlots) Add(s);
+        return gems.ToArray();
+    }
+
+    private static object SkillsListing(SkillsTabViewModel v) => new
+    {
+        ok = true,
+        groups = v.Groups.Select(g => new
+        {
+            index            = g.Index,
+            name             = g.ActiveGemName,
+            isMain           = g.IsMain,
+            enabled          = g.IsEnabled,
+            includeInFullDps = g.IncludeInFullDps,
+            isGranted        = g.IsGranted,
+            sourceLabel      = g.SourceLabel,
+            gems             = SkillGemList(g),
+        }).ToArray(),
+    };
+
+    private static SkillsTabViewModel? SkillsVmOrError(out object error)
+    {
+        error = null!;
+        if (GetSkillsVm() is not { } v)
+        {
+            error = new { error = "SkillsTab not ready." };
+            return null;
+        }
+        return v;
+    }
+
+    private static SkillGroupViewModel? ResolveGroup(int gi, SkillsTabViewModel v, out object error)
+    {
+        error = null!;
+        var grp = v.Groups.FirstOrDefault(g => g.Index == gi);
+        if (grp is null)
+        {
+            var avail = string.Join(", ", v.Groups.Select(g => $"[{g.Index}] {g.ActiveGemName}"));
+            error = new { error = $"group {gi} not found. Available: {avail}" };
+        }
+        return grp;
+    }
+
+    private static object SkillsList()
+    {
+        if (SkillsVmOrError(out var err) is not { } v) return err;
+        return SkillsListing(v);
+    }
+
+    private static object SkillsAddGroup(string body)
+    {
+        if (SkillsVmOrError(out var err) is not { } v) return err;
+        var req = JsonSerializer.Deserialize<Dictionary<string, string>>(body) ?? new();
+        req.TryGetValue("gemName", out var gemName);
+        v.AddGroupFromPicker(gemName ?? "");
+        return SkillsListing(v);
+    }
+
+    private static object SkillsRemoveGroup(string body)
+    {
+        if (SkillsVmOrError(out var err) is not { } v) return err;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("group", out var ge) || ge.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'group' (1-based engine index)." };
+        if (ResolveGroup(ge.GetInt32(), v, out var gerr) is not { } grp) return gerr;
+        if (grp.IsGranted)
+            return new { error = $"group {grp.Index} is granted by '{grp.SourceLabel}' and cannot be removed" };
+        v.RemoveGroup(grp.Index);
+        return SkillsListing(v);
+    }
+
+    private static object SkillsAddGem(string body)
+    {
+        if (SkillsVmOrError(out var err) is not { } v) return err;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("group", out var ge) || ge.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'group'." };
+        if (ResolveGroup(ge.GetInt32(), v, out var gerr) is not { } grp) return gerr;
+        if (!req.TryGetValue("gemName", out var ne) || ne.ValueKind != JsonValueKind.String ||
+            string.IsNullOrWhiteSpace(ne.GetString()))
+            return new { error = "Missing 'gemName'." };
+
+        v.AddGem(grp.Index);
+        var fresh = v.Groups.First(g => g.Index == grp.Index);
+        int newIdx = new[] { fresh.ActiveGem }.Concat(fresh.SupportSlots)
+            .Where(x => x is { GemIndex: > 0 })
+            .Max(x => x!.GemIndex);
+        v.CommitGemName(grp.Index, newIdx, ne.GetString()!);
+        return SkillsListing(v);
+    }
+
+    private static object SkillsRemoveGem(string body)
+    {
+        if (SkillsVmOrError(out var err) is not { } v) return err;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("group", out var ge) || ge.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'group'." };
+        if (ResolveGroup(ge.GetInt32(), v, out var gerr) is not { } grp) return gerr;
+        if (!req.TryGetValue("gem", out var gme) || gme.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'gem' (1-based gem index)." };
+
+        v.RemoveGem(grp.Index, gme.GetInt32());
+        return SkillsListing(v);
+    }
+
+    private static object SkillsSetGem(string body)
+    {
+        if (SkillsVmOrError(out var err) is not { } v) return err;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("group", out var ge) || ge.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'group'." };
+        if (ResolveGroup(ge.GetInt32(), v, out var gerr) is not { } grp) return gerr;
+        if (!req.TryGetValue("gem", out var gme) || gme.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'gem' (1-based gem index)." };
+        int gem = gme.GetInt32();
+
+        if (req.TryGetValue("name", out var ne) && ne.ValueKind == JsonValueKind.String)
+            v.CommitGemName(grp.Index, gem, ne.GetString() ?? "");
+        if (req.TryGetValue("level", out var le) && le.ValueKind == JsonValueKind.Number)
+            v.SyncGemLevel(grp.Index, gem, le.GetInt32());
+        if (req.TryGetValue("quality", out var qe) && qe.ValueKind == JsonValueKind.Number)
+            v.SyncGemQuality(grp.Index, gem, qe.GetInt32());
+        if (req.TryGetValue("enabled", out var ee) &&
+            (ee.ValueKind == JsonValueKind.True || ee.ValueKind == JsonValueKind.False))
+            v.SyncGemEnabled(grp.Index, gem, ee.GetBoolean());
+
+        // Sync* calls push to the engine but don't rebuild gem VMs (the UI
+        // slider does that first); the IPC path has no UI, so re-read.
+        v.Refresh();
+        return SkillsListing(v);
+    }
+
+    private static object SkillsSetGroup(string body)
+    {
+        if (SkillsVmOrError(out var err) is not { } v) return err;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("group", out var ge) || ge.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'group'." };
+        if (ResolveGroup(ge.GetInt32(), v, out var gerr) is not { } grp) return gerr;
+
+        if (req.TryGetValue("enabled", out var ee) &&
+            (ee.ValueKind == JsonValueKind.True || ee.ValueKind == JsonValueKind.False))
+            v.SyncGroupEnabled(grp.Index, ee.GetBoolean());
+        if (req.TryGetValue("includeInFullDps", out var fe) &&
+            (fe.ValueKind == JsonValueKind.True || fe.ValueKind == JsonValueKind.False))
+            v.SyncGroupIncludeInFullDps(grp.Index, fe.GetBoolean());
+        if (req.TryGetValue("label", out var lb) && lb.ValueKind == JsonValueKind.String)
+            v.SetGroupLabel(grp.Index, lb.GetString() ?? "");
+
+        v.Refresh();
+        return SkillsListing(v);
+    }
+
+    private static object SkillsSetMain(string body)
+    {
+        if (SkillsVmOrError(out var err) is not { } v) return err;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("group", out var ge) || ge.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'group'." };
+        if (ResolveGroup(ge.GetInt32(), v, out var gerr) is not { } grp) return gerr;
+
+        v.SetMainGroup(grp.Index);
+        return SkillsListing(v);
     }
 
     // ── Support-gem picker (selector) test hooks ──────────────────────────────
@@ -1329,6 +1538,138 @@ public sealed class IpcServer
         };
     }
 
+    // ── Tree building (agent-driven allocation) ────────────────────────────
+    // Backed by TreeTabViewModel.AllocatePathTo / DeallocateNode — the same
+    // code the VM tests in PBLEngine.Tests cover; these handlers are thin.
+
+    private static object PointsPayload(PBLEngine.PointUsage? u) => u is null
+        ? (object)null!
+        : new
+        {
+            passivesUsed   = u.PassivesUsed,
+            passivesMax    = u.PassivesMax,
+            ascendancyUsed = u.AscendancyUsed,
+            ascendancyMax  = u.AscendancyMax,
+            weaponSet1Used = u.WeaponSet1Used,
+            weaponSet2Used = u.WeaponSet2Used,
+            weaponSetMax   = u.WeaponSetMax,
+        };
+
+    private static bool OverBudget(PBLEngine.PointUsage? u) =>
+        u is { } v && (v.PassivesUsed > v.PassivesMax || v.AscendancyUsed > v.AscendancyMax);
+
+    private static object TreeAllocated()
+    {
+        if (GetTreeVm() is not { } t) return new { error = "TreeTab not ready." };
+        var alloc = t.AllocatedIds.OrderBy(x => x).ToArray();
+        var byId  = t.Nodes.ToDictionary(n => n.Id);
+        var nodes = alloc.Where(byId.ContainsKey).Select(id => new
+        {
+            id,
+            name       = byId[id].Name,
+            type       = byId[id].Type,
+            ascendancy = byId[id].AscendancyName,
+        }).ToArray();
+        var usage = t.PointUsage;
+        return new
+        {
+            ok         = true,
+            ids        = alloc,
+            nodes,
+            points     = PointsPayload(usage),
+            overBudget = OverBudget(usage),
+        };
+    }
+
+    private static async Task<object> TreeAllocatePath(string body)
+    {
+        if (GetTreeVm() is not { } t) return new { error = "TreeTab not ready." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("nodeId", out var n) || n.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'nodeId'." };
+        string? attribute = req.TryGetValue("attribute", out var a) && a.ValueKind == JsonValueKind.String
+            ? a.GetString()
+            : null;
+
+        var r = await t.AllocatePathTo(n.GetInt32(), attribute);
+        await t.WaitForEngineSettledAsync();   // idempotent; AllocatePathTo settles internally
+        var usage = t.PointUsage;
+        return new
+        {
+            ok             = r.Ok,
+            error          = r.Error,
+            path           = r.Path,
+            failed         = r.Failed,
+            attributeNodes = r.AttributeNodes,
+            pointsSpent    = r.PointsSpent,
+            points         = PointsPayload(usage),
+            overBudget     = OverBudget(usage),
+        };
+    }
+
+    private static async Task<object> TreeDeallocateNode(string body)
+    {
+        if (GetTreeVm() is not { } t) return new { error = "TreeTab not ready." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("nodeId", out var n) || n.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'nodeId'." };
+
+        var (ok, error, dependents) = await t.DeallocateNode(n.GetInt32());
+        await t.WaitForEngineSettledAsync();
+        return new { ok, error, dependents };
+    }
+
+    private static object TreeNodes(string body)
+    {
+        if (GetTreeVm() is not { } t) return new { error = "TreeTab not ready." };
+        var req = string.IsNullOrWhiteSpace(body)
+            ? new Dictionary<string, JsonElement>()
+            : JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        string? query = req.TryGetValue("query", out var q) && q.ValueKind == JsonValueKind.String
+            ? q.GetString() : null;
+        int? nearId = req.TryGetValue("nearId", out var ni) && ni.ValueKind == JsonValueKind.Number
+            ? ni.GetInt32() : null;
+        int limit = req.TryGetValue("limit", out var l) && l.ValueKind == JsonValueKind.Number
+            ? l.GetInt32() : 50;
+        limit = Math.Clamp(limit, 1, 200);
+
+        var byId = t.Nodes.ToDictionary(n => n.Id);
+        IEnumerable<TreeNodeDto> source = t.Nodes;
+        if (!string.IsNullOrEmpty(query))
+        {
+            source = source.Where(nd =>
+                nd.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                nd.Stats.Any(s => s.Contains(query, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        TreeNodeDto? near = nearId is { } id && byId.TryGetValue(id, out var nd2) ? nd2 : null;
+        if (near is not null)
+            source = source.OrderBy(nd =>
+            {
+                double dx = nd.X - near.X, dy = nd.Y - near.Y;
+                return dx * dx + dy * dy;
+            });
+
+        var selected = source.Take(limit).ToArray();
+        return new
+        {
+            ok    = true,
+            count = selected.Length,
+            nodes = selected.Select(nd => new
+            {
+                id         = nd.Id,
+                x          = nd.X,
+                y          = nd.Y,
+                name       = nd.Name,
+                type       = nd.Type,
+                ascendancy = nd.AscendancyName,
+                allocated  = t.AllocatedIds.Contains(nd.Id),
+                stats      = nd.Stats,
+                linkedIds  = nd.LinkedIds,
+            }).ToArray(),
+        };
+    }
+
     private static object TreeSelectClass(string body)
     {
         if (GetTreeVm() is not { } t) return new { error = "TreeTab not ready." };
@@ -1591,6 +1932,161 @@ public sealed class IpcServer
             return new { error = "Not on the build page." };
         bp.UpdateFromGameCommand.Execute(null);
         return new { ok = true };
+    }
+
+    // ── Stats / build persistence / notes (agent-facing) ───────────────────
+
+    private static BuildPageViewModel? BuildPageOrError(out object error)
+    {
+        error = null!;
+        var bp = GetMainVm()?.CurrentPage as BuildPageViewModel;
+        if (bp is null) error = new { error = "Not on BuildPage." };
+        return bp;
+    }
+
+    /// <summary>Full stat dump of the open build, optionally filtered:
+    /// GET /stats?keys=TotalDPS,Life — empty keys returns all (~600) stats.</summary>
+    private static object GetStatsFiltered(string query)
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.Build is not { } build) return new { error = "Build not loaded yet." };
+
+        var keys = new List<string>();
+        foreach (var part in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var kv = part.Split('=', 2);
+            if (kv.Length == 2 && kv[0] == "keys")
+                keys.AddRange(Uri.UnescapeDataString(kv[1])
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        }
+
+        var all = build.AllStats;
+        if (keys.Count == 0)
+            return all
+                .Where(kv => kv.Value is not null)
+                .OrderBy(kv => kv.Key)
+                .ToDictionary(kv => kv.Key, kv => kv.Value);
+
+        var result = new Dictionary<string, object?>();
+        foreach (var k in keys)
+        {
+            all.TryGetValue(k, out var v);
+            result[k] = v;
+        }
+        return result;
+    }
+
+    private static async Task<object> BuildSave()
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        await bp.SaveNow();
+        return new { ok = true, path = bp.XmlPath };
+    }
+
+    private static object BuildXml()
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.Build is not { } build) return new { error = "Build not loaded yet." };
+        var xml = build.SaveBuildToXml();
+        return xml is null ? new { error = "SaveBuildToXml returned null." } : new { ok = true, xml };
+    }
+
+    private static object NotesGet()
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.NotesTab is not { } t) return new { error = "NotesTab not ready." };
+        return new { ok = true, text = t.Notes };
+    }
+
+    private static object NotesSet(string body)
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.NotesTab is not { } t) return new { error = "NotesTab not ready." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, string>>(body) ?? new();
+        if (!req.TryGetValue("text", out var text))
+            return new { error = "Missing 'text'." };
+        t.Notes = text;
+        t.ApplyToBuild();   // so /build/save persists the agent-written notes
+        return new { ok = true };
+    }
+
+    // ── Config tab (agent-facing) ──────────────────────────────────────────
+
+    private static object ConfigOptionState(ConfigOptionViewModel o) => new
+    {
+        var     = o.Var,
+        label   = o.Label,
+        type    = o.Type,
+        value   = o.Type == "check" ? (object)o.IsChecked
+                : o.Type == "list"  ? o.SelectedVal
+                :                     o.TextValue,
+        listOptions = o.Type == "list"
+            ? o.ListOptions.Select(li => new { label = li.Label, val = li.Val }).ToArray()
+            : null,
+    };
+
+    private static object ConfigState()
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.ConfigTab is not { } cfg) return new { error = "ConfigTab not ready." };
+        return new
+        {
+            ok = true,
+            sections = cfg.Sections.Select(s => new
+            {
+                name    = s.Name,
+                options = s.Options.Select(ConfigOptionState).ToArray(),
+            }).ToArray(),
+        };
+    }
+
+    private static object ConfigSet(string body)
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.ConfigTab is not { } cfg) return new { error = "ConfigTab not ready." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, string>>(body) ?? new();
+        if (!req.TryGetValue("var", out var varName) || string.IsNullOrWhiteSpace(varName))
+            return new { error = "Missing 'var'." };
+        if (!req.TryGetValue("value", out var value))
+            return new { error = "Missing 'value'." };
+
+        var opt = cfg.Sections.SelectMany(s => s.Options)
+            .FirstOrDefault(o => o.Var.Equals(varName, StringComparison.Ordinal));
+        if (opt is null)
+        {
+            var avail = string.Join(", ", cfg.Sections.SelectMany(s => s.Options).Select(o => o.Var));
+            return new { error = $"config var '{varName}' not found. Available: {avail}" };
+        }
+
+        switch (opt.Type)
+        {
+            case "check":
+                if (value is not "true" and not "false")
+                    return new { error = $"check option '{varName}' expects 'true' or 'false'." };
+                opt.IsChecked = value == "true";   // setter applies via SetConfigValue
+                break;
+            case "list":
+                var item = opt.ListOptions.FirstOrDefault(li => li.Val == value)
+                        ?? opt.ListOptions.FirstOrDefault(li => li.Label == value);
+                if (item is null)
+                    return new
+                    {
+                        error = $"unknown value '{value}' for '{varName}'. Options: " +
+                                string.Join(", ", opt.ListOptions.Select(li => li.Val)),
+                    };
+                opt.SelectedItem = item;           // setter applies via SetConfigValue
+                break;
+            default:
+                // Numeric option types gate on the invariant culture (Lua
+                // tonumber expects a dot) — reject up front so {ok:true} never
+                // lies about a value the VM would silently drop.
+                if (opt.Type != "text" && !Core.ConfigValues.IsNumericInvariant(value))
+                    return new { error = $"option '{varName}' expects a number (dot decimal separator), got '{value}'." };
+                opt.TextValue = value;             // OnTextValueChanged applies (text as-is, numbers validated)
+                break;
+        }
+
+        return new { ok = true, var = varName, applied = value };
     }
 
     /// <summary>Открывает окно «Импорт/Экспорт» открытого билда — там же живёт

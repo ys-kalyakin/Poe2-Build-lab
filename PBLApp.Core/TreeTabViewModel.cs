@@ -461,44 +461,22 @@ public partial class TreeTabViewModel : ViewModelBase
     /// <summary>Shortest path (node ids) from the allocated tree to
     /// <paramref name="target"/> over node links — what <c>spec:AllocNode</c>
     /// will allocate. Empty when unreachable. Main-tree ↔ ascendancy boundary
-    /// is not crossed. Used to paint the allocation optimistically.</summary>
+    /// is not crossed. Used to paint the allocation optimistically.
+    /// The search itself lives in <see cref="TreePathFinder"/> (pure, unit-tested).
+    /// </summary>
     private List<int> PredictAllocPath(int target)
     {
         var byId = _nodeIndex ??= Nodes.ToDictionary(n => n.Id);
-        if (!byId.TryGetValue(target, out var tNode)) return [];
-        var alloc = AllocatedIds;
-        if (alloc.Count == 0 || alloc.Contains(target)) return [];
-
-        var visited = new HashSet<int>(alloc);
-        var parent  = new Dictionary<int, int>();
-        var queue   = new Queue<int>(alloc);
-        bool found  = false;
-        while (queue.Count > 0)
-        {
-            int cur = queue.Dequeue();
-            if (cur == target) { found = true; break; }
-            if (!byId.TryGetValue(cur, out var curNode)) continue;
-            bool curAsc = !string.IsNullOrEmpty(curNode.AscendancyName);
-            foreach (var lid in curNode.LinkedIds)
-            {
-                if (!visited.Add(lid)) continue;
-                if (!byId.TryGetValue(lid, out var lnode)) continue;
-                if (curAsc != !string.IsNullOrEmpty(lnode.AscendancyName)) continue;
-                parent[lid] = cur;
-                queue.Enqueue(lid);
-            }
-        }
-        if (!found) return [];
-        var path = new List<int> { target };
-        int n = target;
-        while (parent.TryGetValue(n, out var p)) { if (alloc.Contains(p)) break; path.Add(p); n = p; }
-        return path;
+        return TreePathFinder.FindPath(byId, AllocatedIds, target);
     }
 
     /// <summary>Runs the heavy <c>spec:AllocNode/DeallocNode</c> on a background
     /// thread, serialized so NLua is single-threaded, then (when the burst has
-    /// drained) recalcs stats and reconciles the allocated set from Lua.</summary>
-    private async Task RunBackgroundToggle(int nodeId, bool allocate)
+    /// drained) recalcs stats and reconciles the allocated set from Lua.
+    /// <paramref name="attributeIndex"/> (1=Str, 2=Dex, 3=Int) routes an
+    /// attribute node through <see cref="LuaHost.AllocAttributeNode"/> instead
+    /// of the dialog callback — the agent/IPC path never opens dialogs.</summary>
+    private async Task RunBackgroundToggle(int nodeId, bool allocate, int? attributeIndex = null)
     {
         await _luaQueue.WaitAsync();
         try
@@ -507,8 +485,15 @@ public partial class TreeTabViewModel : ViewModelBase
             // when the queue drains) so the spinner doesn't flicker between ops.
             await Task.Run(() =>
             {
-                if (allocate) _host.AllocNode(nodeId, deferRecalc: true);
-                else          _host.DeallocNode(nodeId, deferRecalc: true);
+                if (allocate)
+                {
+                    if (attributeIndex is { } idx) _host.AllocAttributeNode(nodeId, idx);
+                    else                           _host.AllocNode(nodeId, deferRecalc: true);
+                }
+                else
+                {
+                    _host.DeallocNode(nodeId, deferRecalc: true);
+                }
             });
 
             // Only the last toggle of a burst pays the stats recalc + reconcile.
@@ -564,6 +549,149 @@ public partial class TreeTabViewModel : ViewModelBase
         else              await AllocNodeAsync(id);
         sw.Stop();
         return (id, AllocatedIds.Contains(id), sw.Elapsed.TotalMilliseconds);
+    }
+
+    // ── Agent/IPC mutation API ─────────────────────────────────────────────
+    // Backs the /tree/allocate-path and /tree/deallocate-node IPC endpoints:
+    // unlike the optimistic UI path these never open dialogs (attribute nodes
+    // auto-pick or take an explicit index) and callers can await engine truth.
+
+    /// <summary>Result of an agent-driven path allocation. Budget over-runs are
+    /// allowed (same as the UI) — check <see cref="Usage"/> for the truth.
+    /// <see cref="Path"/> is what was requested, <see cref="Failed"/> is the
+    /// part the engine refused (empty on success): the outcome is reconciled
+    /// engine truth, not a prediction.</summary>
+    public record TreeAllocateOutcome(
+        bool Ok,
+        string? Error,
+        List<int> Path,
+        List<int> Failed,
+        List<int> AttributeNodes,
+        int PointsSpent,
+        PointUsage? Usage);
+
+    /// <summary>Public read of the last point-usage snapshot (null before the
+    /// first refresh).</summary>
+    public PointUsage? PointUsage => _pointUsage;
+
+    /// <summary>Allocates the shortest path from the allocated tree to
+    /// <paramref name="nodeId"/>, node by node, awaiting the engine each step.
+    /// Attribute nodes on the path pick <paramref name="attribute"/>
+    /// ("str"/"dex"/"int") or the engine default when null. The outcome is
+    /// reconciled against Lua truth before returning: <see cref="TreeAllocateOutcome.Failed"/>
+    /// lists nodes the engine refused, <see cref="TreeAllocateOutcome.PointsSpent"/>
+    /// counts what actually took. Never refuses on budget.</summary>
+    public async Task<TreeAllocateOutcome> AllocatePathTo(int nodeId, string? attribute = null)
+    {
+        var byId = _nodeIndex ??= Nodes.ToDictionary(n => n.Id);
+        var path = TreePathFinder.FindPath(byId, AllocatedIds, nodeId);
+        if (path.Count == 0)
+            return new TreeAllocateOutcome(
+                false, $"unreachable: node {nodeId} is not linked to the allocated tree",
+                [], [], [], 0, _pointUsage);
+
+        int wanted = attribute?.ToLowerInvariant() switch
+        {
+            "str" => 1, "dex" => 2, "int" => 3,
+            _     => 0,
+        };
+
+        var attrNodes = new List<int>();
+        foreach (var id in path)
+        {
+            if (byId[id].IsAttribute) attrNodes.Add(id);
+            int? idx = byId[id].IsAttribute && wanted > 0 ? wanted : null;
+
+            var set = new HashSet<int>(AllocatedIds);
+            set.Add(id);
+            AllocatedIds = set;
+
+            Interlocked.Increment(ref _pendingToggles);
+            IsToggleBusy = true;
+            await RunBackgroundToggle(id, allocate: true, idx);
+        }
+
+        await WaitForEngineSettledAsync();
+
+        // Reconcile the claim against engine truth: AllocNode can refuse a node
+        // (already allocated, no path, unlock constraints) and return 0 silently.
+        var failed = path.Where(id => !AllocatedIds.Contains(id)).ToList();
+        var took   = path.Where(AllocatedIds.Contains).ToList();
+        return new TreeAllocateOutcome(
+            failed.Count == 0, failed.Count > 0 ? "some path nodes were not allocated by the engine" : null,
+            path, failed, attrNodes, took.Count, _pointUsage);
+    }
+
+    /// <summary>Refunds a single allocated node. Refuses when other allocated
+    /// nodes would be orphaned (they depend on this node for connectivity).</summary>
+    public async Task<(bool Ok, string? Error, int[] Dependents)> DeallocateNode(int nodeId)
+    {
+        if (!AllocatedIds.Contains(nodeId))
+            return (false, $"node {nodeId} is not allocated", []);
+
+        var dependents = DependentsOf(nodeId);
+        if (dependents.Length > 0)
+            return (false,
+                $"node {nodeId} has dependents: {string.Join(", ", dependents)}",
+                dependents);
+
+        var set = new HashSet<int>(AllocatedIds);
+        set.Remove(nodeId);
+        AllocatedIds = set;
+
+        Interlocked.Increment(ref _pendingToggles);
+        IsToggleBusy = true;
+        await RunBackgroundToggle(nodeId, allocate: false);
+        return (true, null, []);
+    }
+
+    /// <summary>Allocated nodes that would lose tree connectivity if
+    /// <paramref name="nodeId"/> were refunded: components of the allocated
+    /// subgraph (without the node) that contain no class/ascendancy start.</summary>
+    private int[] DependentsOf(int nodeId)
+    {
+        var byId = _nodeIndex ??= Nodes.ToDictionary(n => n.Id);
+        var alloc = AllocatedIds.Where(id => id != nodeId).ToHashSet();
+        var visited = new HashSet<int>();
+        var orphans = new List<int>();
+        foreach (var start in alloc)
+        {
+            if (!visited.Add(start)) continue;
+            var component = new List<int>();
+            bool hasStartNode = false;
+            var queue = new Queue<int>();
+            queue.Enqueue(start);
+            while (queue.Count > 0)
+            {
+                int cur = queue.Dequeue();
+                component.Add(cur);
+                if (byId.TryGetValue(cur, out var cn) &&
+                    cn.Type is "ClassStart" or "AscendClassStart")
+                    hasStartNode = true;
+                if (!byId.TryGetValue(cur, out var node)) continue;
+                foreach (var lid in node.LinkedIds)
+                    if (alloc.Contains(lid) && visited.Add(lid))
+                        queue.Enqueue(lid);
+            }
+            if (!hasStartNode) orphans.AddRange(component);
+        }
+        return orphans.OrderBy(x => x).ToArray();
+    }
+
+    /// <summary>Awaits until every enqueued toggle reached the engine and the
+    /// allocated set was reconciled from Lua — the "engine truth" barrier the
+    /// IPC mutation endpoints answer after.</summary>
+    public async Task WaitForEngineSettledAsync()
+    {
+        while (Volatile.Read(ref _pendingToggles) > 0)
+            await Task.Delay(25);
+        await _luaQueue.WaitAsync();
+        try
+        {
+            RefreshAllocated();
+            RefreshPointUsage();
+        }
+        finally { _luaQueue.Release(); }
     }
 
     private void RefreshNodes()

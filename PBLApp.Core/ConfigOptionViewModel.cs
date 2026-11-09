@@ -1,4 +1,5 @@
 using CommunityToolkit.Mvvm.ComponentModel;
+using PBLApp.Core;
 using PBLApp.Core.Localization;
 using PBLEngine;
 using System.Linq;
@@ -79,7 +80,7 @@ public partial class ConfigOptionViewModel : ObservableObject
             return;
         }
         if (string.IsNullOrWhiteSpace(value)) return;
-        if (!double.TryParse(value, out _)) return;
+        if (!ConfigValues.IsNumericInvariant(value)) return;
         _host.SetConfigValue(Var, value);
         _build.Refresh();
     }

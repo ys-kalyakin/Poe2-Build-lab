@@ -36,17 +36,47 @@ public class VisualTools
             }
 
             // Find the PBLApp executable. Prefer freshly-built Debug binary.
+            // Windows: PBLApp.exe; Linux/macOS: the apphost "PBLApp" (no
+            // extension) or fall back to `dotnet PBLApp.dll`.
             var repoRoot = FindRepoRoot();
-            var exe = Path.Combine(repoRoot, "PBLApp", "bin", "Debug", "net9.0", "PBLApp.exe");
-            if (!File.Exists(exe))
-                return Error($"PBLApp.exe not found at {exe}. Build the project first (dotnet build PBLApp/PBLApp.csproj).");
+            var binDir   = Path.Combine(repoRoot, "PBLApp", "bin", "Debug", "net9.0");
+            var exe      = Path.Combine(binDir, "PBLApp.exe");
+            var apphost  = Path.Combine(binDir, "PBLApp");
+            var dll      = Path.Combine(binDir, "PBLApp.dll");
 
-            var psi = new ProcessStartInfo(exe, "--enable-ipc")
+            ProcessStartInfo psi;
+            if (File.Exists(exe))
+                psi = new ProcessStartInfo(exe, "--enable-ipc");
+            else if (File.Exists(apphost) && !OperatingSystem.IsWindows())
+                psi = new ProcessStartInfo(apphost, "--enable-ipc");
+            else if (File.Exists(dll))
+                psi = new ProcessStartInfo("dotnet", $"\"{dll}\" --enable-ipc");
+            else
+                return Error($"PBLApp build not found in {binDir}. Build the project first (dotnet build PBLApp/PBLApp.csproj).");
+
+            psi.UseShellExecute  = false;
+            psi.WorkingDirectory = repoRoot;
+            psi.CreateNoWindow   = false;
+
+            // The apphost resolves libhostfxr via DOTNET_ROOT (or PATH). MCP
+            // host processes often have neither — probe the usual locations.
+            // Real .NET layouts nest the library under host/fxr/<version>/.
+            if (!OperatingSystem.IsWindows() && string.IsNullOrEmpty(
+                    psi.EnvironmentVariables["DOTNET_ROOT"]))
             {
-                UseShellExecute  = false,
-                WorkingDirectory = repoRoot,
-                CreateNoWindow   = false,
-            };
+                foreach (var cand in new[]
+                         {
+                             "/usr/share/dotnet", "/usr/lib/dotnet",
+                             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dotnet"),
+                         })
+                {
+                    if (HasHostFxr(cand))
+                    {
+                        psi.EnvironmentVariables["DOTNET_ROOT"] = cand;
+                        break;
+                    }
+                }
+            }
             var proc = Process.Start(psi)
                        ?? throw new InvalidOperationException("Process.Start returned null.");
 
@@ -623,7 +653,307 @@ public class VisualTools
         catch (Exception ex) { return Error(ex); }
     }
 
+    // ── Tree building (agent-driven allocation) ────────────────────────────
+
+    [McpServerTool]
+    [Description(
+        "List allocated passive-tree nodes with point usage: ids, names/types/ascendancy, " +
+        "points (passives/ascendancy/weapon sets) and overBudget flag.")]
+    public async Task<string> VisualTreeAllocated()
+    {
+        try { return await IpcClient.CallAsync("GET", "/tree/allocated"); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Allocate the shortest path from the allocated tree to a node (engine-verified). " +
+        "Attribute path nodes auto-pick, or pass attribute 'str'/'dex'/'int'. Point " +
+        "over-budget is allowed like the UI; response carries overBudget + points.")]
+    public async Task<string> VisualTreeAllocatePath(
+        [Description("Numeric passive-tree node id to allocate.")] int nodeId,
+        [Description("Attribute for '+5 to any attribute' path nodes: 'str', 'dex' or 'int'. Null = engine default.")] string? attribute = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/tree/allocate-path", new { nodeId, attribute }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Refund one allocated passive node. Fails with the dependents list when other " +
+        "allocated nodes rely on it for tree connectivity.")]
+    public async Task<string> VisualTreeDeallocateNode(
+        [Description("Numeric node id to refund.")] int nodeId)
+    {
+        try { return await IpcClient.CallAsync("POST", "/tree/deallocate-node", new { nodeId }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Find passive-tree nodes by name or stat text (case-insensitive substring), " +
+        "optionally sorted by distance from nearId. Returns id, coords, name, type, " +
+        "allocated flag, stats, linked ids — the ids for visual_tree_allocate_path.")]
+    public async Task<string> VisualTreeNodes(
+        [Description("Search query against node name or stat lines. Empty = all nodes.")] string? query = null,
+        [Description("Sort results by distance from this node id.")] int? nearId = null,
+        [Description("Max nodes to return (1-200, default 50).")] int limit = 50)
+    {
+        try { return await IpcClient.CallAsync("POST", "/tree/nodes", new { query, nearId, limit }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Toggle one passive node (allocate if free, refund if allocated). Pass no id to " +
+        "toggle an auto-picked node adjacent to the allocated tree. Prefer " +
+        "visual_tree_allocate_path / visual_tree_deallocate_node for deliberate changes.")]
+    public async Task<string> VisualTreeToggleNode(
+        [Description("Numeric node id, or null to auto-pick.")] int? nodeId = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/tree/toggle-node", new { nodeId }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Set the tree search text (highlights matching nodes on the canvas).")]
+    public async Task<string> VisualTreeSetSearch(
+        [Description("Search text, empty to clear.")] string text)
+    {
+        try { return await IpcClient.CallAsync("POST", "/tree/set-search", new { text }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Read passive-node tooltip text (raw + translated): one node by id, or every " +
+        "allocated node when no id is passed.")]
+    public async Task<string> VisualTreeNodeText(
+        [Description("Numeric node id, or null for all allocated nodes.")] int? nodeId = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/tree/node-text", new { nodeId }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    // ── Skills CRUD ────────────────────────────────────────────────────────
+    // Every mutation response echoes a fresh group listing — the engine
+    // re-indexes groups/gems densely after removals, so always re-address
+    // from the latest listing (1-based engine indexes).
+
+    [McpServerTool]
+    [Description(
+        "List all skill groups with their gems: index, name, isMain, enabled, " +
+        "includeInFullDps, isGranted, and per-gem gemIndex/name/level/quality/enabled/isSupport.")]
+    public async Task<string> VisualSkillsList()
+    {
+        try { return await IpcClient.CallAsync("GET", "/skills/list"); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Add a new skill group with an active gem by name (e.g. 'Fireball'). Returns the refreshed listing.")]
+    public async Task<string> VisualSkillsAddGroup(
+        [Description("Active gem name for the new group. Empty = empty group.")] string? gemName = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/add-group", new { gemName }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Remove a skill group by its listing index. Granted groups (from tree/items) cannot be removed. Returns the refreshed listing.")]
+    public async Task<string> VisualSkillsRemoveGroup(
+        [Description("Group index from visual_skills_list (1-based engine index).")] int group)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/remove-group", new { group }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Add a gem (active or support) to a skill group by name. Returns the refreshed listing.")]
+    public async Task<string> VisualSkillsAddGem(
+        [Description("Group index from visual_skills_list.")] int group,
+        [Description("Gem name, e.g. 'Arc' or a support gem name.")] string gemName)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/add-gem", new { group, gemName }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Remove a gem from a skill group. Indexes shift after removal — re-read the returned listing. Returns the refreshed listing.")]
+    public async Task<string> VisualSkillsRemoveGem(
+        [Description("Group index.")] int group,
+        [Description("1-based gem index from the listing.")] int gem)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/remove-gem", new { group, gem }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Change gem name/level/quality/enabled in one call. Only provided fields apply. " +
+        "Returns the refreshed listing.")]
+    public async Task<string> VisualSkillsSetGem(
+        [Description("Group index.")] int group,
+        [Description("1-based gem index.")] int gem,
+        [Description("New gem name (partial not allowed — full name).")] string? name = null,
+        [Description("New gem level (1-20).")] int? level = null,
+        [Description("New gem quality (0-30).")] int? quality = null,
+        [Description("Enable/disable the gem.")] bool? enabled = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/set-gem", new { group, gem, name, level, quality, enabled }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Toggle a skill group's enabled/includeInFullDps flags or rename its label. Returns the refreshed listing.")]
+    public async Task<string> VisualSkillsSetGroup(
+        [Description("Group index.")] int group,
+        [Description("Enable/disable the whole group.")] bool? enabled = null,
+        [Description("Include the group's damage in Full DPS.")] bool? includeInFullDps = null,
+        [Description("Custom group label.")] string? label = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/set-group", new { group, enabled, includeInFullDps, label }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Set the main (active) skill group — the one Full DPS is calculated for. Returns the refreshed listing.")]
+    public async Task<string> VisualSkillsSetMain(
+        [Description("Group index.")] int group)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/set-main", new { group }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Read PoB-style gem tooltips for every skill group (same path the UI hover uses). Use to inspect what a gem does.")]
+    public async Task<string> VisualSkillsTooltips()
+    {
+        try { return await IpcClient.CallAsync("GET", "/skills/tooltips"); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Read the support-gem picker state for a support slot: tabs, counts and filtered gem options. Address: group index + 0-based slot ordinal.")]
+    public async Task<string> VisualSkillsSupportPicker(
+        [Description("Group index.")] int group,
+        [Description("0-based support slot ordinal.")] int slot)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/support-picker", new { group = group.ToString(), slot = slot.ToString() }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Switch the support picker's attribute tab ('All'/'Str'/'Dex'/'Int'/'Special'). Returns the picker state.")]
+    public async Task<string> VisualSkillsSupportSetTab(
+        [Description("Group index.")] int group,
+        [Description("0-based support slot ordinal.")] int slot,
+        [Description("Tab key: All, Str, Dex, Int or Special.")] string tab)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/support-picker/set-tab", new { group = group.ToString(), slot = slot.ToString(), tab }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Set the support picker's support mode (true = show support gems, false = show active gems for trigger groups). Returns the picker state.")]
+    public async Task<string> VisualSkillsSupportSetMode(
+        [Description("Group index.")] int group,
+        [Description("0-based support slot ordinal.")] int slot,
+        [Description("Support mode on/off.")] bool support)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/support-picker/set-mode", new { group = group.ToString(), slot = slot.ToString(), support = support ? "true" : "false" }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Choose a gem for a support slot by name (same as clicking a row in the picker). Returns {committed}.")]
+    public async Task<string> VisualSkillsSupportSelect(
+        [Description("Group index.")] int group,
+        [Description("0-based support slot ordinal.")] int slot,
+        [Description("Gem name to commit.")] string name)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/support-picker/select", new { group = group.ToString(), slot = slot.ToString(), name }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    // ── Stats / build persistence / notes ──────────────────────────────────
+
+    [McpServerTool]
+    [Description(
+        "Get stats of the open build in the running client. Pass keys='' for all ~600 " +
+        "stats, or a comma-separated list like 'TotalDPS,Life,EnergyShield'.")]
+    public async Task<string> VisualGetStats(
+        [Description("Comma-separated stat keys, or empty for all.")] string keys = "")
+    {
+        try { return await IpcClient.CallAsync("GET", "/stats?keys=" + Uri.EscapeDataString(keys)); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Save the open build to its XML file. Returns {ok, path}.")]
+    public async Task<string> VisualBuildSave()
+    {
+        try { return await IpcClient.CallAsync("POST", "/build/save", new { }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Return the full XML of the open build (for storing/branching builds). Large response.")]
+    public async Task<string> VisualBuildXml()
+    {
+        try { return await IpcClient.CallAsync("GET", "/build/xml"); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Read or write the build's Notes tab. Empty text = read; with text = write " +
+        "(persisted on visual_build_save). Use for recommendations the user can read.")]
+    public async Task<string> VisualNotes(
+        [Description("Notes text to write; empty to read current.")] string text = "")
+    {
+        try
+        {
+            return string.IsNullOrEmpty(text)
+                ? await IpcClient.CallAsync("GET", "/notes")
+                : await IpcClient.CallAsync("POST", "/notes", new { text });
+        }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    // ── Config tab ─────────────────────────────────────────────────────────
+
+    [McpServerTool]
+    [Description(
+        "Read the Config tab of the open build: sections with options (var, label, type, " +
+        "current value, list options). These settings (enemy, charges, bandits, ...) affect stats.")]
+    public async Task<string> VisualConfigState()
+    {
+        try { return await IpcClient.CallAsync("GET", "/config/state"); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Set a Config-tab option by var: 'true'/'false' for check, a val from " +
+        "visual_config_state listOptions for list, a raw string/number otherwise. Affects stats.")]
+    public async Task<string> VisualConfigSet(
+        [Description("Option var from visual_config_state.")] string var,
+        [Description("New value ('true'/'false', list val, or raw text/number).")] string value)
+    {
+        try { return await IpcClient.CallAsync("POST", "/config/set", new { @var, value }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────
+
+    /// <summary>True when <paramref name="root"/> looks like a .NET install the
+    /// apphost can resolve: host/fxr/&lt;version&gt;/libhostfxr.so exists.</summary>
+    private static bool HasHostFxr(string? root) =>
+        !string.IsNullOrEmpty(root) &&
+        Directory.Exists(Path.Combine(root, "host", "fxr")) &&
+        Directory.EnumerateDirectories(Path.Combine(root, "host", "fxr"))
+            .Any(d => File.Exists(Path.Combine(d, "libhostfxr.so")));
 
     private static string FindRepoRoot()
     {
@@ -673,6 +1003,48 @@ public class VisualTools
     public async Task<string> VisualTraderSetLeague(string league)
     {
         try { return await IpcClient.CallAsync("POST", "/trader/set-league", new { league }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    // ── Misc app-level wraps ───────────────────────────────────────────────
+
+    [McpServerTool]
+    [Description(
+        "Dump the visible UI text of the running client (all windows, labels, tabs, lists) " +
+        "to verify what the user actually sees.")]
+    public async Task<string> VisualUiText()
+    {
+        try { return await IpcClient.CallAsync("POST", "/ui/text", new { }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Open the character-import window: on the BuildList page it imports a new build " +
+        "from the GGG account; on an open build it updates that build from the game.")]
+    public async Task<string> VisualCharacterImport()
+    {
+        try { return await IpcClient.CallAsync("POST", "/character-import/open", new { }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Open the Import/Export window of the open build (poeplanner/pobintree codes, " +
+        "game guide export). Returns {placedOnScreen}.")]
+    public async Task<string> VisualExportOpen()
+    {
+        try { return await IpcClient.CallAsync("POST", "/export/open", new { }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Re-import the currently open build from the game account (same as the " +
+        "'Update from game' button). Requires an imported character.")]
+    public async Task<string> VisualUpdateFromGame()
+    {
+        try { return await IpcClient.CallAsync("POST", "/build/update-from-game", new { }); }
         catch (Exception ex) { return Error(ex); }
     }
 
