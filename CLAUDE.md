@@ -133,28 +133,31 @@ All UI controls extend `Classes/Control.lua`. The tab system (`TreeTab`, `ItemsT
 
 ---
 
-## C# Projects (PBLHost directory)
+## C# Projects (repo root)
 
-A parallel C# solution lives in `PBLHost/` and hosts the PoB Lua engine via NLua (.NET 9, Lua 5.4). These projects are separate from the Lua application above.
+A parallel C# solution lives at the repo root (`Poe2BuildLab.sln`) and hosts the PoB Lua engine via NLua (.NET 9, Lua 5.4). These projects are separate from the Lua application above. Works on both Windows and Linux (the GUI uses Avalonia X11/Win32 backends; NLua ships native `liblua54.so`/`lua54.dll` via KeraLua).
 
 ### Solution Layout
 
 ```
-PBLHost/          PBLHost.sln entry point (console verification runner)
+Poe2BuildLab.sln  solution at repo root
+PBLHost/          console verification runner (NLua/Lua 5.4 smoke tests)
 PBLEngine/        Shared class library — NLua host, BuildModel
+PBLEngine.Tests/  engine test suite
 PBLApp.Core/      MVVM ViewModels — no Avalonia dependency
 PBLApp/           Avalonia 12 UI (XAML views, ViewLocator)
 PBLMcp/           MCP stdio server for agent testing
 PBLParity/        Console tool: orig PoB vs PBLEngine stat comparison (see tools/parity/README.md)
+PBLExport/        GGPK data-export tool + icon cache (python/Node generators live next to it)
+PBLDataExport/    data export helper
 ```
 
 ### Build & Run
 
-```powershell
-# From repo root
-cd PBLHost
-dotnet build PBLHost.sln          # build all projects
-dotnet run --project PBLHost      # run verification (10 tests)
+```bash
+# From repo root (dotnet must be on PATH; .NET 9 SDK required)
+dotnet build Poe2BuildLab.sln     # build all projects
+dotnet run --project PBLHost      # run verification tests
 dotnet run --project PBLMcp       # start MCP server (stdio)
 dotnet run --project PBLApp       # launch Avalonia GUI
 ```

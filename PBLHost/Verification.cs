@@ -240,7 +240,9 @@ public static class Verification
             {
                 if (string.IsNullOrEmpty(o.Var))
                     throw new Exception($"Option with empty Var found: label='{o.Label}'");
-                if (string.IsNullOrEmpty(o.Label))
+                // type="text" options (e.g. customMods, ConfigOptions.lua) intentionally
+                // have label="" — their section header serves as the label in the UI.
+                if (string.IsNullOrEmpty(o.Label) && o.Type != "text")
                     throw new Exception($"Option with empty Label found: var='{o.Var}'");
             }
         });
