@@ -705,6 +705,147 @@ public class VisualTools
         catch (Exception ex) { return Error(ex); }
     }
 
+    // ── Skills CRUD ────────────────────────────────────────────────────────
+    // Every mutation response echoes a fresh group listing — the engine
+    // re-indexes groups/gems densely after removals, so always re-address
+    // from the latest listing (1-based engine indexes).
+
+    [McpServerTool]
+    [Description(
+        "List all skill groups with their gems: index, name, isMain, enabled, " +
+        "includeInFullDps, isGranted, and per-gem gemIndex/name/level/quality/enabled/isSupport.")]
+    public async Task<string> VisualSkillsList()
+    {
+        try { return await IpcClient.CallAsync("GET", "/skills/list"); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Add a new skill group with an active gem by name (e.g. 'Fireball'). Returns the refreshed listing.")]
+    public async Task<string> VisualSkillsAddGroup(
+        [Description("Active gem name for the new group. Empty = empty group.")] string? gemName = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/add-group", new { gemName }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Remove a skill group by its listing index. Granted groups (from tree/items) cannot be removed. Returns the refreshed listing.")]
+    public async Task<string> VisualSkillsRemoveGroup(
+        [Description("Group index from visual_skills_list (1-based engine index).")] int group)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/remove-group", new { group }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Add a gem (active or support) to a skill group by name. Returns the refreshed listing.")]
+    public async Task<string> VisualSkillsAddGem(
+        [Description("Group index from visual_skills_list.")] int group,
+        [Description("Gem name, e.g. 'Arc' or a support gem name.")] string gemName)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/add-gem", new { group, gemName }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Remove a gem from a skill group. Indexes shift after removal — re-read the returned listing. Returns the refreshed listing.")]
+    public async Task<string> VisualSkillsRemoveGem(
+        [Description("Group index.")] int group,
+        [Description("1-based gem index from the listing.")] int gem)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/remove-gem", new { group, gem }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Change gem name/level/quality/enabled in one call. Only provided fields apply. " +
+        "Returns the refreshed listing.")]
+    public async Task<string> VisualSkillsSetGem(
+        [Description("Group index.")] int group,
+        [Description("1-based gem index.")] int gem,
+        [Description("New gem name (partial not allowed — full name).")] string? name = null,
+        [Description("New gem level (1-20).")] int? level = null,
+        [Description("New gem quality (0-30).")] int? quality = null,
+        [Description("Enable/disable the gem.")] bool? enabled = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/set-gem", new { group, gem, name, level, quality, enabled }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Toggle a skill group's enabled/includeInFullDps flags or rename its label. Returns the refreshed listing.")]
+    public async Task<string> VisualSkillsSetGroup(
+        [Description("Group index.")] int group,
+        [Description("Enable/disable the whole group.")] bool? enabled = null,
+        [Description("Include the group's damage in Full DPS.")] bool? includeInFullDps = null,
+        [Description("Custom group label.")] string? label = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/set-group", new { group, enabled, includeInFullDps, label }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Set the main (active) skill group — the one Full DPS is calculated for. Returns the refreshed listing.")]
+    public async Task<string> VisualSkillsSetMain(
+        [Description("Group index.")] int group)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/set-main", new { group }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Read PoB-style gem tooltips for every skill group (same path the UI hover uses). Use to inspect what a gem does.")]
+    public async Task<string> VisualSkillsTooltips()
+    {
+        try { return await IpcClient.CallAsync("GET", "/skills/tooltips"); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Read the support-gem picker state for a support slot: tabs, counts and filtered gem options. Address: group index + 0-based slot ordinal.")]
+    public async Task<string> VisualSkillsSupportPicker(
+        [Description("Group index.")] int group,
+        [Description("0-based support slot ordinal.")] int slot)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/support-picker", new { group = group.ToString(), slot = slot.ToString() }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Switch the support picker's attribute tab ('All'/'Str'/'Dex'/'Int'/'Special'). Returns the picker state.")]
+    public async Task<string> VisualSkillsSupportSetTab(
+        [Description("Group index.")] int group,
+        [Description("0-based support slot ordinal.")] int slot,
+        [Description("Tab key: All, Str, Dex, Int or Special.")] string tab)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/support-picker/set-tab", new { group = group.ToString(), slot = slot.ToString(), tab }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Set the support picker's support mode (true = show support gems, false = show active gems for trigger groups). Returns the picker state.")]
+    public async Task<string> VisualSkillsSupportSetMode(
+        [Description("Group index.")] int group,
+        [Description("0-based support slot ordinal.")] int slot,
+        [Description("Support mode on/off.")] bool support)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/support-picker/set-mode", new { group = group.ToString(), slot = slot.ToString(), support = support ? "true" : "false" }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Choose a gem for a support slot by name (same as clicking a row in the picker). Returns {committed}.")]
+    public async Task<string> VisualSkillsSupportSelect(
+        [Description("Group index.")] int group,
+        [Description("0-based support slot ordinal.")] int slot,
+        [Description("Gem name to commit.")] string name)
+    {
+        try { return await IpcClient.CallAsync("POST", "/skills/support-picker/select", new { group = group.ToString(), slot = slot.ToString(), name }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────
 
     private static string FindRepoRoot()

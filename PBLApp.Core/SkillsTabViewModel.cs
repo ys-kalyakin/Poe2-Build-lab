@@ -792,6 +792,23 @@ public partial class SkillsTabViewModel : ViewModelBase
         AfterModify();
     }
 
+    /// <summary>Agent/IPC hook: set the main (active) skill group by engine
+    /// index — the same path the SetAsMain command drives from the UI.</summary>
+    public void SetMainGroup(int groupIdx)
+    {
+        _host.SetActiveSkillGroup(groupIdx);
+        _build.Refresh();
+        RefreshMainFlag();
+        _onGroupsChanged?.Invoke();
+    }
+
+    /// <summary>Agent/IPC hook: rename a skill group label by engine index.</summary>
+    public void SetGroupLabel(int groupIdx, string label)
+    {
+        _host.SetGroupLabel(groupIdx, label);
+        AfterModify();
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────
 
     private void RebuildGroupGems(int groupIdx)

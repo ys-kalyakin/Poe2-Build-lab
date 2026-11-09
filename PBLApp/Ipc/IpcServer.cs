@@ -183,6 +183,14 @@ public sealed class IpcServer
                 "/tree/deallocate-node"   => await OnUiAsync(() => TreeDeallocateNode(body)),
                 "/tree/nodes"             => await OnUi(() => TreeNodes(body)),
                 "/skills/tooltips"        => await OnUi(SkillsTooltips),
+                "/skills/list"            => await OnUi(SkillsList),
+                "/skills/add-group"       => await OnUi(() => SkillsAddGroup(body)),
+                "/skills/remove-group"    => await OnUi(() => SkillsRemoveGroup(body)),
+                "/skills/add-gem"         => await OnUi(() => SkillsAddGem(body)),
+                "/skills/remove-gem"      => await OnUi(() => SkillsRemoveGem(body)),
+                "/skills/set-gem"         => await OnUi(() => SkillsSetGem(body)),
+                "/skills/set-group"       => await OnUi(() => SkillsSetGroup(body)),
+                "/skills/set-main"        => await OnUi(() => SkillsSetMain(body)),
                 "/skills/support-picker"          => await OnUi(() => SupportPickerState(body)),
                 "/skills/support-picker/set-tab"  => await OnUi(() => SupportPickerSetTab(body)),
                 "/skills/support-picker/set-mode" => await OnUi(() => SupportPickerSetMode(body)),
@@ -730,6 +738,194 @@ public sealed class IpcServer
             });
         }
         return new { ok = true, groups = groups.ToArray() };
+    }
+
+    // ── Skills CRUD (agent-facing) ─────────────────────────────────────────
+    // Addressing contract: engine 1-based group/gem indexes (group == the
+    // 'index' field of the listing, gem == 'gemIndex'). The engine re-indexes
+    // densely after every removal, so EVERY mutation response echoes a fresh
+    // listing — that echo is the only valid addressing for the next call.
+
+    private static object[] SkillGemList(SkillGroupViewModel g)
+    {
+        var gems = new List<object>();
+        void Add(GemViewModel? gem)
+        {
+            if (gem is null || gem.GemIndex <= 0) return;   // VM-side empty slots are not addressable
+            gems.Add(new
+            {
+                gemIndex  = gem.GemIndex,
+                name      = gem.CommittedName,
+                level     = (int)gem.Level,
+                quality   = (int)gem.Quality,
+                enabled   = gem.IsEnabled,
+                isSupport = gem.IsSupport,
+            });
+        }
+        Add(g.ActiveGem);
+        foreach (var s in g.SupportSlots) Add(s);
+        return gems.ToArray();
+    }
+
+    private static object SkillsListing(SkillsTabViewModel v) => new
+    {
+        ok = true,
+        groups = v.Groups.Select(g => new
+        {
+            index            = g.Index,
+            name             = g.ActiveGemName,
+            isMain           = g.IsMain,
+            enabled          = g.IsEnabled,
+            includeInFullDps = g.IncludeInFullDps,
+            isGranted        = g.IsGranted,
+            sourceLabel      = g.SourceLabel,
+            gems             = SkillGemList(g),
+        }).ToArray(),
+    };
+
+    private static SkillsTabViewModel? SkillsVmOrError(out object error)
+    {
+        error = null!;
+        if (GetSkillsVm() is not { } v)
+        {
+            error = new { error = "SkillsTab not ready." };
+            return null;
+        }
+        return v;
+    }
+
+    private static SkillGroupViewModel? ResolveGroup(int gi, SkillsTabViewModel v, out object error)
+    {
+        error = null!;
+        var grp = v.Groups.FirstOrDefault(g => g.Index == gi);
+        if (grp is null)
+        {
+            var avail = string.Join(", ", v.Groups.Select(g => $"[{g.Index}] {g.ActiveGemName}"));
+            error = new { error = $"group {gi} not found. Available: {avail}" };
+        }
+        return grp;
+    }
+
+    private static object SkillsList()
+    {
+        if (SkillsVmOrError(out var err) is not { } v) return err;
+        return SkillsListing(v);
+    }
+
+    private static object SkillsAddGroup(string body)
+    {
+        if (SkillsVmOrError(out var err) is not { } v) return err;
+        var req = JsonSerializer.Deserialize<Dictionary<string, string>>(body) ?? new();
+        req.TryGetValue("gemName", out var gemName);
+        v.AddGroupFromPicker(gemName ?? "");
+        return SkillsListing(v);
+    }
+
+    private static object SkillsRemoveGroup(string body)
+    {
+        if (SkillsVmOrError(out var err) is not { } v) return err;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("group", out var ge) || ge.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'group' (1-based engine index)." };
+        if (ResolveGroup(ge.GetInt32(), v, out var gerr) is not { } grp) return gerr;
+        if (grp.IsGranted)
+            return new { error = $"group {grp.Index} is granted by '{grp.SourceLabel}' and cannot be removed" };
+        v.RemoveGroup(grp.Index);
+        return SkillsListing(v);
+    }
+
+    private static object SkillsAddGem(string body)
+    {
+        if (SkillsVmOrError(out var err) is not { } v) return err;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("group", out var ge) || ge.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'group'." };
+        if (ResolveGroup(ge.GetInt32(), v, out var gerr) is not { } grp) return gerr;
+        if (!req.TryGetValue("gemName", out var ne) || ne.ValueKind != JsonValueKind.String ||
+            string.IsNullOrWhiteSpace(ne.GetString()))
+            return new { error = "Missing 'gemName'." };
+
+        v.AddGem(grp.Index);
+        var fresh = v.Groups.First(g => g.Index == grp.Index);
+        int newIdx = new[] { fresh.ActiveGem }.Concat(fresh.SupportSlots)
+            .Where(x => x is { GemIndex: > 0 })
+            .Max(x => x!.GemIndex);
+        v.CommitGemName(grp.Index, newIdx, ne.GetString()!);
+        return SkillsListing(v);
+    }
+
+    private static object SkillsRemoveGem(string body)
+    {
+        if (SkillsVmOrError(out var err) is not { } v) return err;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("group", out var ge) || ge.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'group'." };
+        if (ResolveGroup(ge.GetInt32(), v, out var gerr) is not { } grp) return gerr;
+        if (!req.TryGetValue("gem", out var gme) || gme.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'gem' (1-based gem index)." };
+
+        v.RemoveGem(grp.Index, gme.GetInt32());
+        return SkillsListing(v);
+    }
+
+    private static object SkillsSetGem(string body)
+    {
+        if (SkillsVmOrError(out var err) is not { } v) return err;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("group", out var ge) || ge.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'group'." };
+        if (ResolveGroup(ge.GetInt32(), v, out var gerr) is not { } grp) return gerr;
+        if (!req.TryGetValue("gem", out var gme) || gme.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'gem' (1-based gem index)." };
+        int gem = gme.GetInt32();
+
+        if (req.TryGetValue("name", out var ne) && ne.ValueKind == JsonValueKind.String)
+            v.CommitGemName(grp.Index, gem, ne.GetString() ?? "");
+        if (req.TryGetValue("level", out var le) && le.ValueKind == JsonValueKind.Number)
+            v.SyncGemLevel(grp.Index, gem, le.GetInt32());
+        if (req.TryGetValue("quality", out var qe) && qe.ValueKind == JsonValueKind.Number)
+            v.SyncGemQuality(grp.Index, gem, qe.GetInt32());
+        if (req.TryGetValue("enabled", out var ee) &&
+            (ee.ValueKind == JsonValueKind.True || ee.ValueKind == JsonValueKind.False))
+            v.SyncGemEnabled(grp.Index, gem, ee.GetBoolean());
+
+        // Sync* calls push to the engine but don't rebuild gem VMs (the UI
+        // slider does that first); the IPC path has no UI, so re-read.
+        v.Refresh();
+        return SkillsListing(v);
+    }
+
+    private static object SkillsSetGroup(string body)
+    {
+        if (SkillsVmOrError(out var err) is not { } v) return err;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("group", out var ge) || ge.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'group'." };
+        if (ResolveGroup(ge.GetInt32(), v, out var gerr) is not { } grp) return gerr;
+
+        if (req.TryGetValue("enabled", out var ee) &&
+            (ee.ValueKind == JsonValueKind.True || ee.ValueKind == JsonValueKind.False))
+            v.SyncGroupEnabled(grp.Index, ee.GetBoolean());
+        if (req.TryGetValue("includeInFullDps", out var fe) &&
+            (fe.ValueKind == JsonValueKind.True || fe.ValueKind == JsonValueKind.False))
+            v.SyncGroupIncludeInFullDps(grp.Index, fe.GetBoolean());
+        if (req.TryGetValue("label", out var lb) && lb.ValueKind == JsonValueKind.String)
+            v.SetGroupLabel(grp.Index, lb.GetString() ?? "");
+
+        v.Refresh();
+        return SkillsListing(v);
+    }
+
+    private static object SkillsSetMain(string body)
+    {
+        if (SkillsVmOrError(out var err) is not { } v) return err;
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("group", out var ge) || ge.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'group'." };
+        if (ResolveGroup(ge.GetInt32(), v, out var gerr) is not { } grp) return gerr;
+
+        v.SetMainGroup(grp.Index);
+        return SkillsListing(v);
     }
 
     // ── Support-gem picker (selector) test hooks ──────────────────────────────
