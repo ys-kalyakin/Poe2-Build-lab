@@ -1012,7 +1012,8 @@ public class VisualTools
     [Description(
         "List base item types that exist in the game. Without 'category' returns all " +
         "category names; with 'category' returns its bases (name, implicit mod, level " +
-        "requirement, type, rune socket count). Partial category match, error lists valid ones.")]
+        "requirement, type, rune socket count). Exact (case-insensitive) category match; " +
+        "an unknown category error lists the valid ones.")]
     public async Task<string> VisualItemBases([Description("Category name, e.g. 'Wand', 'Helmet'. Optional.")] string? category = null)
     {
         try { return await IpcClient.CallAsync("POST", "/items/bases", new { category }); }
@@ -1043,10 +1044,11 @@ public class VisualTools
 
     [McpServerTool]
     [Description(
-        "Currency/exchange rates in divines from poe.ninja (cached 1h). type is one of: " +
-        "Currency, Fragments, Abyss, UncutGems, LineageSupportGems, Essences, SoulCores, " +
-        "Idols, Runes, RitualOmens, Expedition, Delirium, Breach, Verisium. Use to express " +
-        "a build budget in divines.")]
+        "Currency/exchange rates in divines from poe.ninja (cached 1h). Requires the trader " +
+        "session — if you get 'Trader session not created', call visual_trader_open once. " +
+        "type is one of: Currency, Fragments, Abyss, UncutGems, LineageSupportGems, Essences, " +
+        "SoulCores, Idols, Runes, RitualOmens, Expedition, Delirium, Breach, Verisium. Use to " +
+        "express a build budget in divines.")]
     public async Task<string> VisualPricesCurrency(
         [Description("Exchange type, default 'Currency'.")] string type = "Currency",
         [Description("Substring filter by currency name. Optional.")] string? query = null)
@@ -1058,10 +1060,12 @@ public class VisualTools
     [McpServerTool]
     [Description(
         "Unique item prices from poe.ninja (cached 1h): price in divines, live listing count " +
-        "(liquidity), corrupted flag, mod texts. type is one of: UniqueWeapons, UniqueArmours, " +
-        "UniqueAccessories, UniqueFlasks, UniqueCharms, UniqueJewels, UniqueSanctumRelics, " +
-        "UniqueTablets, PrecursorTablets. For exact rare-item prices use the trader tools " +
-        "(visual_trader_open/search/state) instead — they need the user's trade login.")]
+        "(liquidity), corrupted flag, mod texts. Requires the trader session — if you get " +
+        "'Trader session not created', call visual_trader_open once. type is one of: " +
+        "UniqueWeapons, UniqueArmours, UniqueAccessories, UniqueFlasks, UniqueCharms, " +
+        "UniqueJewels, UniqueSanctumRelics, UniqueTablets, PrecursorTablets. For exact " +
+        "rare-item prices use the trader tools (visual_trader_open/search/state) instead — " +
+        "they need the user's trade login.")]
     public async Task<string> VisualPricesUniques(
         [Description("Stash type, default 'UniqueArmours'.")] string type = "UniqueArmours",
         [Description("Substring filter by unique name or base. Optional.")] string? query = null)

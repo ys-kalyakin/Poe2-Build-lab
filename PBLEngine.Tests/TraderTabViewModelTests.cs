@@ -158,7 +158,12 @@ public class TraderTabViewModelTests : IClassFixture<LuaHostFixture>
             var session = new TraderSession(_host, new BuildModel(_host),
                 webApi: new PBLApp.Core.Trader.TraderWebApi(fake));
             session.SelectedLeague = "Standard";
-            await Task.Delay(300); // фон конструктора (лиги/курсы) оседает — ответы fake мгновенны
+            // фон конструктора (лиги + LoadRates по смене лиги) оседает, когда
+            // появился его ninja-запрос — детерминированно вместо sleep
+            var settleAt = DateTime.UtcNow.AddSeconds(5);
+            while (DateTime.UtcNow < settleAt && !fake.Requests.Any(r =>
+                r.RequestUri!.ToString().Contains("poe.ninja")))
+                await Task.Delay(20);
 
             var items = await session.GetUniquePricesAsync("UniqueWeapons");
             Assert.Equal(2, items.Count);

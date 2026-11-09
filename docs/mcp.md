@@ -162,6 +162,8 @@ MVVM-драйвер для тестов.
 **Сохранить билд** — `visual_build_save` (XML по пути из ответа).
 
 **Оценить бюджет билда**
+0. Один раз: `visual_trader_open {slot}` — создаёт трейд-сессию, без неё
+   `visual_prices_*` вернут ошибку.
 1. Уники из билда: `visual_item_uniques` (или имена из тултипов) →
    `visual_prices_uniques {query: имя}` по каждому (type по слоту).
 2. Крафт/валюта на апгрейды: `visual_prices_currency` (типы Essences,

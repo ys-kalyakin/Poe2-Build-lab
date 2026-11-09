@@ -181,4 +181,26 @@ public class TraderWebApiTests
         Assert.DoesNotContain("UniqueWeapon", TraderWebApi.StashItemTypes); // poe1-форма
         Assert.Equal(9, TraderWebApi.StashItemTypes.Count);
     }
+
+    [Fact]
+    public async Task GetExchangeRates_RejectsTypeOutsideWhitelist()
+    {
+        // ninja на неверный тип отвечает 200 с пустыми lines — «рынок пуст»,
+        // закэшированный на час. Отсекаем до запроса.
+        var api = new TraderWebApi(MakeTypedHandler());
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => api.GetExchangeRatesAsync("Standard", "Fragment"));
+        var ok = await api.GetExchangeRatesAsync("Standard", "Currency"); // в whitelist — работает
+        Assert.Equal(0.005, ok["exalted"], 6);
+    }
+
+    [Fact]
+    public async Task GetUniquePrices_RejectsTypeOutsideWhitelist()
+    {
+        var api = new TraderWebApi(MakeStashHandler());
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => api.GetUniquePricesAsync("Standard", "UniqueWeapon")); // poe1-форма
+        var ok = await api.GetUniquePricesAsync("Standard", "UniqueWeapons");
+        Assert.Equal(2, ok.Count);
+    }
 }

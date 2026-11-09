@@ -15,7 +15,7 @@ namespace PBLApp.Core.Trader;
 public sealed class TraderWebApi
 {
     private readonly HttpClient _http;
-    private readonly Dictionary<string, (DateTime FetchedAt, IReadOnlyDictionary<string, double> Rates)> _ratesCache = [];
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime FetchedAt, IReadOnlyDictionary<string, double> Rates)> _ratesCache = [];
     private static readonly TimeSpan RatesTtl = TimeSpan.FromHours(1);
 
     /// <summary>Exchange-типы poe.ninja для poe2 (doka /docs/api). Важно: во
@@ -25,6 +25,13 @@ public sealed class TraderWebApi
         "Currency", "Fragments", "Abyss", "UncutGems", "LineageSupportGems", "Essences",
         "SoulCores", "Idols", "Runes", "RitualOmens", "Expedition", "Delirium", "Breach", "Verisium",
     ];
+
+    private static void EnsureType(string type, IReadOnlyList<string> allowed, string param)
+    {
+        if (!allowed.Contains(type))
+            throw new ArgumentException(
+                $"Unknown type '{type}'. Allowed: {string.Join(", ", allowed)}.", param);
+    }
 
     public TraderWebApi(HttpMessageHandler? handler = null)
     {
@@ -68,6 +75,7 @@ public sealed class TraderWebApi
     public async Task<IReadOnlyDictionary<string, double>> GetExchangeRatesAsync(
         string league, string type, CancellationToken ct = default)
     {
+        EnsureType(type, ExchangeTypes, nameof(type));
         var key = $"{league}|{type}";
         if (_ratesCache.TryGetValue(key, out var cached) &&
             DateTime.UtcNow - cached.FetchedAt < RatesTtl)
@@ -96,7 +104,7 @@ public sealed class TraderWebApi
         return rates;
     }
 
-    private readonly Dictionary<string, (DateTime FetchedAt, IReadOnlyList<UniquePriceEntry> Items)> _itemCache = [];
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime FetchedAt, IReadOnlyList<UniquePriceEntry> Items)> _itemCache = [];
 
     /// <summary>Stash-типы poe.ninja для poe2 (доки /docs/api): уники. Для poe2
     /// формы со «s» — UniqueWeapons, не UniqueWeapon (как в poe1).</summary>
@@ -113,6 +121,7 @@ public sealed class TraderWebApi
     public async Task<IReadOnlyList<UniquePriceEntry>> GetUniquePricesAsync(
         string league, string type, string? query = null, CancellationToken ct = default)
     {
+        EnsureType(type, StashItemTypes, nameof(type));
         var key = $"{league}|{type}";
         if (!_itemCache.TryGetValue(key, out var cached) ||
             DateTime.UtcNow - cached.FetchedAt >= RatesTtl)

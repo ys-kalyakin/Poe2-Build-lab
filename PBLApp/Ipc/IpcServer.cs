@@ -1970,7 +1970,7 @@ public sealed class IpcServer
     {
         var s = GetTraderSession();
         return s is null
-            ? (null, (object)new { error = "Trader session not created. Open a build page first." })
+            ? (null, (object)new { error = "Trader session not created. It appears when the trader window is opened once — call /trader/open (MCP: visual_trader_open) — then price tools work." })
             : (s, null);
     }
 
