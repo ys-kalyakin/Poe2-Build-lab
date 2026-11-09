@@ -1,0 +1,160 @@
+# MCP: управление PoE2 Build Lab через ИИ-агента
+
+PoE2 Build Lab поставляется с MCP-сервером (`PBLMcp`, stdio): ИИ-агент
+(Claude Desktop, ZCode и т. п.) подключается к нему и получает полный набор
+инструментов — от чтения статов до постройки билда: дерево пассивок, скилы и
+гемы, экипировка, конфиг, сохранение.
+
+## Два режима инструментов
+
+| Группа | Как работает | Когда использовать |
+|---|---|---|
+| `visual_*` | управляет **живым окном** PBLApp через локальный HTTP IPC (127.0.0.1 + токен) | основной сценарий: агент меняет билд, пользователь видит всё в реальном времени |
+| `pbl_*`, `app_*` | headless-движок (LuaHost) и MVVM-драйвер **внутри процесса MCP** | быстрые расчёты, CI, тесты; пользователь ничего не видит |
+
+Инструменты `visual_*` требуют запущенный клиент — запускайте
+`visual_launch_client` первым (он сам найдёт бинарник: Windows —
+`PBLApp.exe`, Linux — apphost `PBLApp` или `dotnet PBLApp.dll`; клиент
+стартует с `--enable-ipc`). Первый вызов любого инструмента подождёт
+инициализации движка (~30–45 с).
+
+## Подключение
+
+### ZCode
+
+В настройках MCP (`mcpServers`):
+
+```json
+{
+  "mcpServers": {
+    "poe2-build-lab": {
+      "command": "dotnet",
+      "args": ["run", "--project", "/path/to/Poe2-Build-lab/PBLMcp/PBLMcp.csproj"]
+    }
+  }
+}
+```
+
+Вариант с собранной dll (быстрее старта):
+
+```bash
+dotnet build PBLMcp/PBLMcp.csproj -c Release
+# command: dotnet, args: ["/path/to/PBLMcp/bin/Release/net9.0/PBLMcp.dll"]
+```
+
+### Claude Desktop
+
+`claude_desktop_config.json` (`Settings → Developer → Edit Config`):
+
+```json
+{
+  "mcpServers": {
+    "poe2-build-lab": {
+      "command": "dotnet",
+      "args": ["/path/to/Poe2-Build-lab/PBLMcp/bin/Release/net9.0/PBLMcp.dll"]
+    }
+  }
+}
+```
+
+## Каталог инструментов `visual_*`
+
+### Клиент и навигация
+`visual_launch_client` · `visual_is_client_running` · `visual_close_client` ·
+`visual_get_state` · `visual_select_tab` (Items/Tree/Skills/Calcs/Config/…) ·
+`visual_list_builds` · `visual_open_build` · `visual_go_back` ·
+`visual_screenshot` · `visual_set_language` (en/ru) · `visual_ui_text` (дамп
+видимого текста UI)
+
+### Дерево — построение
+`visual_tree_allocated` — занятые узлы + бюджет очков и `overBudget` ·
+`visual_tree_nodes` — поиск узлов по имени/статам (возвращает id для аллокации) ·
+`visual_tree_allocate_path` — проложить кратчайший путь до узла (атрибутивные
+узлы автоматически или `attribute: str/dex/int`) · `visual_tree_deallocate_node`
+— снять узел (откажет со списком зависимых) · `visual_tree_toggle_node` ·
+`visual_tree_node_text` — текст тултипов узлов · `visual_tree_set_search`
+
+### Дерево — просмотр и анализ
+`visual_tree_state` · `visual_tree_select_class` ·
+`visual_tree_select_ascendancy` · `visual_tree_get_view` / `set_view` /
+`focus_node` / `zoom` / `pan` · `visual_tree_open_jewel_picker` /
+`pick_jewel` · `visual_tree_power_build` / `visual_tree_power_report`
+(heatmap мощности узлов)
+
+### Скилы и гемы
+`visual_skills_list` — все группы и гемы · `visual_skills_add_group` ·
+`visual_skills_remove_group` (granted-группы защищены) ·
+`visual_skills_add_gem` · `visual_skills_remove_gem` · `visual_skills_set_gem`
+(имя/уровень/качество/вкл одним вызовом) · `visual_skills_set_group`
+(вкл/FullDPS/метка) · `visual_skills_set_main` — активная группа для Full DPS ·
+`visual_skills_tooltips` · `visual_skills_support_picker` /
+`support_set_tab` / `support_set_mode` / `support_select`
+
+> ⚠️ Адресация: индексы движка, 1-based. После любого удаления движок
+> переиндексирует группы и гемы **плотно** — каждый мутационный ответ
+> возвращает свежий листинг, адресуйтесь только по нему.
+
+### Предметы
+`visual_items_state` · `select_slot` / `select_pool` · `equip` / `unequip` ·
+`compatible_slots` · `get_tooltip` / `get_all_tooltips` · редактор:
+`editor_create_new`, `editor_set_rarity/base/unique/quality/corrupted/base_stat/mod_slider`,
+`editor_add_affix` / `remove_mod`, `editor_add_rune_socket` / `set_rune` /
+`remove_rune_socket`, `tattoo_state` / `set_tattoo`, `phylactery_state`,
+`editor_save` · `items_edit_current` / `cancel_edit`
+
+### Статы, конфиг, сохранение
+`visual_get_stats` — все ~600 статов или фильтр `keys=TotalDPS,Life,…` ·
+`visual_config_state` / `visual_config_set` — настройки боя (враг, заряды,
+баффы — влияют на цифры) · `visual_build_save` — сохранить XML билда ·
+`visual_build_xml` — выгрузить XML наружу · `visual_notes` — читать/писать
+заметки билда (рекомендации агента видит пользователь)
+
+### Прочее
+`visual_trader_open` / `search` / `state` / `set_league` — подбор апгрейдов
+через официальный трейд · `visual_character_import` — импорт/обновление
+персонажа из игры · `visual_export_open` — окно импорт/экспорт ·
+`visual_update_from_game` — обновить билд из аккаунта
+
+### Headless (без окна)
+`new_build`, `load_build`, `get_build_xml`, `get_stats`, `set_custom_mods`,
+`add_skill`, `equip_item`, `list_builds`, `run_lua` — прямой движок;
+`app_wait_for_ready`, `app_list_builds`, `app_select_build`, `app_open_build`,
+`app_get_stats`, `app_list_skills`, `app_select_skill`, `app_get_gems`, … —
+MVVM-драйвер для тестов.
+
+## Рецепты
+
+**Проанализируй билд**
+1. `visual_launch_client` → `visual_open_build {name}` (подождать
+   `visual_get_state` → `BuildPageReady`)
+2. `visual_get_stats` (ключевые статы) · `visual_tree_allocated` ·
+   `visual_skills_list`
+3. Выводы — в `visual_notes {text}` (пользователь прочитает в окне заметок) и
+   в ответе агенту.
+
+**Сравнить два предмета**
+1. `visual_items_select_pool` (первый) → `visual_get_stats` → зафиксировать
+2. `visual_items_equip` (второй) → `visual_get_stats` → diff.
+
+**Построить путь на дереве**
+1. `visual_tree_nodes {query: "название узла"}` → взять id
+2. `visual_tree_allocate_path {nodeId}` → в ответе `path`, `pointsSpent`,
+   `overBudget`
+3. `visual_get_stats` — эффект; откат — `visual_tree_deallocate_node`
+   (с конца пути).
+
+**Собрать скил-сетап**
+1. `visual_skills_add_group {gemName}` → индекс из листинга
+2. `visual_skills_add_gem {group, gemName}` для каждого саппорта
+3. `visual_skills_set_main {group}` → `visual_get_stats`.
+
+**Сохранить билд** — `visual_build_save` (XML по пути из ответа).
+
+## Безопасность
+
+- IPC-сервер слушает только `127.0.0.1`, токен лежит в
+  `%LOCALAPPDATA%/PathOfBuilding/mcp-ipc.json`
+  (Linux: `~/.local/share/PathOfBuilding/mcp-ipc.json`) — файл читают только
+  процессы текущего пользователя.
+- Агент управляет **локальным приложением и его билдами**; сетевые вызовы —
+  только официальный трейд/OAuth GGG, как и в ручном режиме.

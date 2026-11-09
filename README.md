@@ -122,6 +122,12 @@ calculation engine is the original, battle-tested PoB one.
 - конфигурация боя (ауры, баффы, заряды, проклятия, сопротивления врага…);
 - размеры и положение окон запоминаются между запусками.
 
+**Управление ИИ-агентом (MCP)**
+- встроенный MCP-сервер: Claude Desktop, ZCode и другие агенты могут
+  анализировать и собирать билд целиком — экипировка, дерево пассивок, скилы,
+  конфиг, статы, сохранение — прямо в живом приложении;
+- подключение и каталог инструментов — в [docs/mcp.md](docs/mcp.md).
+
 ### Сообщество и поддержка
 
 - **Telegram** — [@PoE2BuildLab](https://t.me/PoE2BuildLab): анонсы версий,
@@ -223,6 +229,12 @@ to the sixth decimal.
 - build notes in their own window;
 - combat configuration (auras, buffs, charges, curses, enemy resistances, …);
 - window sizes and positions are remembered between launches.
+
+**AI agent control (MCP)**
+- built-in MCP server: Claude Desktop, ZCode and other agents can analyse and
+  assemble whole builds — items, passive tree, skills, config, stats, save —
+  right inside the live app;
+- setup and tool catalog: [docs/mcp.md](docs/mcp.md).
 
 ### Community and support
 
