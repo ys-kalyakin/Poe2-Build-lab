@@ -212,6 +212,7 @@ public sealed class IpcServer
                 "/stats/diff"     => await OnUi(() => StatsDiffHandler(ctx.Request.Url?.Query ?? "")),
                 "/build/save"    => await OnUiAsync(BuildSave),
                 "/build/xml"     => await OnUi(BuildXml),
+                "/build/import"  => await OnUiAsync(() => BuildImport(body)),
                 "/build/validate" => await OnUi(BuildValidate),
                 "/notes"         => ctx.Request.HttpMethod == "POST"
                                         ? await OnUi(() => NotesSet(body))
@@ -2353,6 +2354,42 @@ public sealed class IpcServer
         if (bp.Build is not { } build) return new { error = "Build not loaded yet." };
         var xml = build.SaveBuildToXml();
         return xml is null ? new { error = "SaveBuildToXml returned null." } : new { ok = true, xml };
+    }
+
+    /// <summary>Импорт XML или PoB share code в живое приложение: LoadBuildFromXml +
+    /// рефреш вкладок. save:false (по умолчанию) — билд только в памяти, файл
+    /// пользователя не перезаписывается; снапшоты статов стираются.</summary>
+    private static async Task<object> BuildImport(string body)
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.Build is not { } build) return new { error = "Build not loaded yet." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        string? xml = null;
+        string? name = null;
+        var save = false;
+        if (req.TryGetValue("xml", out var x) && x.ValueKind == JsonValueKind.String)
+            xml = x.GetString();
+        else if (req.TryGetValue("code", out var c) && c.ValueKind == JsonValueKind.String)
+            xml = PBLEngine.BuildCodec.Decode(c.GetString() ?? "");
+        if (req.TryGetValue("name", out var n) && n.ValueKind == JsonValueKind.String)
+            name = n.GetString();
+        if (req.TryGetValue("save", out var s))
+            save = s.ValueKind == JsonValueKind.True ||
+                   (s.ValueKind == JsonValueKind.String && s.GetString() == "true");
+        if (string.IsNullOrWhiteSpace(xml))
+            return new { error = "Provide 'xml' (build XML text) or 'code' (PoB share code)." };
+        if (!xml.Contains("<PathOfBuilding"))
+            return new { error = "Payload does not look like a PoB build XML (<PathOfBuilding missing). " +
+                                 "For share codes pass them as 'code'." };
+
+        build.LoadBuildFromXml(xml, string.IsNullOrWhiteSpace(name) ? "Imported Build" : name);
+        bp.CalcsTab?.Refresh();
+        bp.SkillsTab?.Refresh();
+        bp.ItemsTab?.Refresh();
+        ClearStatSnapshots();   // снапшоты принадлежали прежнему билду
+        if (save)
+            await bp.SaveNow();
+        return new { ok = true, name = string.IsNullOrWhiteSpace(name) ? "Imported Build" : name, saved = save };
     }
 
     /// <summary>Свод предупреждений билда: несходящиеся атрибуты, отрицательные

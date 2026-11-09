@@ -127,7 +127,10 @@ dotnet build PBLMcp/PBLMcp.csproj -c Release
 ничего не блокирует, предупреждения видны только здесь ·
 `visual_config_state` / `visual_config_set` — настройки боя (враг, заряды,
 баффы — влияют на цифры) · `visual_build_save` — сохранить XML билда ·
-`visual_build_xml` — выгрузить XML наружу · `visual_notes` — читать/писать
+`visual_build_xml` — выгрузить XML наружу ·
+`visual_build_import {xml|code, name?, save?}` — загрузить чужой билд
+(XML или PoB share code) как текущий; по умолчанию только в памяти,
+save:true перезаписывает файл пользователя · `visual_notes` — читать/писать
 заметки билда (рекомендации агента видит пользователь)
 
 ### Прочее
@@ -187,6 +190,16 @@ MVVM-драйвер для тестов.
 1. `visual_skills_add_group {gemName}` → индекс из листинга
 2. `visual_skills_add_gem {group, gemName}` для каждого саппорта
 3. `visual_skills_set_main {group}` → `visual_get_stats`.
+
+**Взять мета-билд за основу и улучшить**
+1. Достань share code билда (poe.ninja, форум) →
+   `visual_build_import {code}` — билд в памяти, файл пользователя не тронут.
+2. `visual_build_validate` → `visual_skills_dps` → `visual_tree_allocated` —
+   что внутри.
+3. Улучшай: примерки через `visual_stats_snapshot`/`diff`, апгрейды через
+   `visual_trader_*`/`visual_prices_*`.
+4. Понравилось — `visual_build_save` (или `visual_build_import {..., save: true}`
+   сразу).
 
 **Сохранить билд** — `visual_build_save` (XML по пути из ответа).
 

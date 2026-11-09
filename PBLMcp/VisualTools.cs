@@ -876,6 +876,22 @@ public class VisualTools
 
     [McpServerTool]
     [Description(
+        "Load someone else's build into the running app: either build XML text ('xml') or a " +
+        "PoB share code from poe.ninja/forums ('code'). Becomes the CURRENT build in memory; " +
+        "save:true overwrites the user's current build file (default false — use visual_build_save " +
+        "or save:true explicitly). Stats snapshots are cleared on import.")]
+    public async Task<string> VisualBuildImport(
+        [Description("Build XML text.")] string? xml = null,
+        [Description("PoB share code (base64url zlib), e.g. from poe.ninja.")] string? code = null,
+        [Description("Build name. Default 'Imported Build'.")] string? name = null,
+        [Description("Overwrite the current build file on disk. Default false.")] bool save = false)
+    {
+        try { return await IpcClient.CallAsync("POST", "/build/import", new { xml, code, name, save }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
         "Validate the current build: unmet attribute requirements, negative unreserved " +
         "Life/Mana/Spirit, skills the pool can't afford, engine item warnings (jewels, " +
         "sockets), disabled skills (e.g. weapon-usable mismatch) and passive/ascendancy/" +
