@@ -891,6 +891,30 @@ public class VisualTools
         catch (Exception ex) { return Error(ex); }
     }
 
+    // ── Config tab ─────────────────────────────────────────────────────────
+
+    [McpServerTool]
+    [Description(
+        "Read the Config tab of the open build: sections with options (var, label, type, " +
+        "current value, list options). These settings (enemy, charges, bandits, ...) affect stats.")]
+    public async Task<string> VisualConfigState()
+    {
+        try { return await IpcClient.CallAsync("GET", "/config/state"); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Set a Config-tab option by var: 'true'/'false' for check, a val from " +
+        "visual_config_state listOptions for list, a raw string/number otherwise. Affects stats.")]
+    public async Task<string> VisualConfigSet(
+        [Description("Option var from visual_config_state.")] string var,
+        [Description("New value ('true'/'false', list val, or raw text/number).")] string value)
+    {
+        try { return await IpcClient.CallAsync("POST", "/config/set", new { @var, value }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────
 
     private static string FindRepoRoot()

@@ -207,6 +207,8 @@ public sealed class IpcServer
                 "/notes"         => ctx.Request.HttpMethod == "POST"
                                         ? await OnUi(() => NotesSet(body))
                                         : await OnUi(NotesGet),
+                "/config/state"  => await OnUi(ConfigState),
+                "/config/set"    => await OnUi(() => ConfigSet(body)),
                 "/app/screens"           => await OnUi(ListScreens),
                 "/app/move-to-screen"    => await OnUi(() => MoveToScreen(body)),
                 "/trader/state"      => await OnUi(TraderState),
@@ -2005,6 +2007,80 @@ public sealed class IpcServer
         t.Notes = text;
         t.ApplyToBuild();   // so /build/save persists the agent-written notes
         return new { ok = true };
+    }
+
+    // ── Config tab (agent-facing) ──────────────────────────────────────────
+
+    private static object ConfigOptionState(ConfigOptionViewModel o) => new
+    {
+        var     = o.Var,
+        label   = o.Label,
+        type    = o.Type,
+        value   = o.Type == "check" ? (object)o.IsChecked
+                : o.Type == "list"  ? o.SelectedVal
+                :                     o.TextValue,
+        listOptions = o.Type == "list"
+            ? o.ListOptions.Select(li => new { label = li.Label, val = li.Val }).ToArray()
+            : null,
+    };
+
+    private static object ConfigState()
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.ConfigTab is not { } cfg) return new { error = "ConfigTab not ready." };
+        return new
+        {
+            ok = true,
+            sections = cfg.Sections.Select(s => new
+            {
+                name    = s.Name,
+                options = s.Options.Select(ConfigOptionState).ToArray(),
+            }).ToArray(),
+        };
+    }
+
+    private static object ConfigSet(string body)
+    {
+        if (BuildPageOrError(out var err) is not { } bp) return err;
+        if (bp.ConfigTab is not { } cfg) return new { error = "ConfigTab not ready." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, string>>(body) ?? new();
+        if (!req.TryGetValue("var", out var varName) || string.IsNullOrWhiteSpace(varName))
+            return new { error = "Missing 'var'." };
+        if (!req.TryGetValue("value", out var value))
+            return new { error = "Missing 'value'." };
+
+        var opt = cfg.Sections.SelectMany(s => s.Options)
+            .FirstOrDefault(o => o.Var.Equals(varName, StringComparison.Ordinal));
+        if (opt is null)
+        {
+            var avail = string.Join(", ", cfg.Sections.SelectMany(s => s.Options).Select(o => o.Var));
+            return new { error = $"config var '{varName}' not found. Available: {avail}" };
+        }
+
+        switch (opt.Type)
+        {
+            case "check":
+                if (value is not "true" and not "false")
+                    return new { error = $"check option '{varName}' expects 'true' or 'false'." };
+                opt.IsChecked = value == "true";   // setter applies via SetConfigValue
+                break;
+            case "list":
+                var item = opt.ListOptions.FirstOrDefault(li => li.Val == value)
+                        ?? opt.ListOptions.FirstOrDefault(li => li.Label == value);
+                if (item is null)
+                    return new
+                    {
+                        error = $"unknown value '{value}' for '{varName}'. Options: " +
+                                string.Join(", ", opt.ListOptions.Select(li => li.Val)),
+                    };
+                opt.SelectedItem = item;           // setter applies via SetConfigValue
+                break;
+            default:
+                opt.TextValue = value;             // OnTextValueChanged applies (text as-is, numbers validated)
+                break;
+        }
+
+        return new { ok = true, var = varName, applied = value };
     }
 
     /// <summary>Открывает окно «Импорт/Экспорт» открытого билда — там же живёт
