@@ -1,7 +1,6 @@
 using PBLEngine;
 using System;
 using System.Collections.Generic;
-using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
@@ -81,30 +80,19 @@ public sealed class PoeOAuthService
         var (verifier, challenge) = CreatePkcePair();
         var state = Convert.ToHexString(RandomNumberGenerator.GetBytes(8)).ToLowerInvariant();
 
-        var (listener, port) = BindRegisteredPort();
-        if (listener is null) return false; // все три порта заняты
-        using var _ = listener;
+        using var callback = LoopbackCallback.Bind(RedirectPorts);
+        if (callback is null) return false; // все три порта заняты
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromMinutes(3));
-        using var abort = timeout.Token.Register(() => { try { listener.Stop(); } catch { } });
 
-        openBrowser(BuildAuthorizeUrl(state, challenge, port));
+        openBrowser(BuildAuthorizeUrl(state, challenge, callback.Port));
 
-        string? code, gotState;
-        try
-        {
-            var ctx = await listener.GetContextAsync();
-            code = ctx.Request.QueryString["code"];
-            gotState = ctx.Request.QueryString["state"];
-            var html = Encoding.UTF8.GetBytes(
-                "<html><body><h3>PathBuildLab: авторизация завершена, вкладку можно закрыть.</h3></body></html>");
-            ctx.Response.ContentType = "text/html; charset=utf-8";
-            await ctx.Response.OutputStream.WriteAsync(html, timeout.Token);
-            ctx.Response.Close();
-        }
-        catch when (timeout.Token.IsCancellationRequested) { return false; }
-        finally { try { listener.Stop(); } catch { } }
+        string? query;
+        try { query = await callback.WaitForCallbackAsync(timeout.Token); }
+        catch (OperationCanceledException) { return false; } // таймаут/отмена — вход не случился
 
+        var code = query is null ? null : QueryParam(query, "code");
+        var gotState = query is null ? null : QueryParam(query, "state");
         if (string.IsNullOrEmpty(code) || gotState != state)
             return false;
 
@@ -114,7 +102,7 @@ public sealed class PoeOAuthService
             ["client_id"] = "pob",
             ["grant_type"] = "authorization_code",
             ["code"] = code,
-            ["redirect_uri"] = $"http://localhost:{port}",
+            ["redirect_uri"] = $"http://localhost:{callback.Port}",
             ["scope"] = Scopes,
             ["code_verifier"] = verifier,
         });
@@ -220,22 +208,17 @@ public sealed class PoeOAuthService
         _host?.SetTradeAuth(access, string.IsNullOrEmpty(refresh) ? null : refresh, expiry);
     }
 
-    private static (HttpListener? Listener, int Port) BindRegisteredPort()
+    /// <summary>Значение параметра из query-строки колбэка ('+' трактуется как пробел).</summary>
+    private static string? QueryParam(string query, string name)
     {
-        foreach (var port in RedirectPorts)
+        foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
         {
-            var listener = new HttpListener();
-            listener.Prefixes.Add($"http://localhost:{port}/");
-            try
-            {
-                listener.Start();
-                return (listener, port);
-            }
-            catch (HttpListenerException)
-            {
-                try { listener.Close(); } catch { }
-            }
+            var eq = pair.IndexOf('=');
+            var key = Uri.UnescapeDataString((eq < 0 ? pair : pair[..eq]).Replace('+', ' '));
+            if (key != name) continue;
+            var raw = eq < 0 ? "" : pair[(eq + 1)..];
+            return Uri.UnescapeDataString(raw.Replace('+', ' '));
         }
-        return (null, 0);
+        return null;
     }
 }
