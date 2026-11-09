@@ -8,6 +8,7 @@ using Avalonia.VisualTree;
 using PBLApp.Core;
 using PBLApp.Core.Localization;
 using PBLApp.ViewModels;
+using PBLEngine;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -177,6 +178,10 @@ public sealed class IpcServer
                 "/tree/pick-jewel"        => await OnUi(() => TreePickJewel(body)),
                 "/tree/power-build"       => await OnUiAsync(() => TreePowerBuild(body)),
                 "/tree/power-report"      => await OnUi(TreePowerReport),
+                "/tree/allocated"         => await OnUi(TreeAllocated),
+                "/tree/allocate-path"     => await OnUiAsync(() => TreeAllocatePath(body)),
+                "/tree/deallocate-node"   => await OnUiAsync(() => TreeDeallocateNode(body)),
+                "/tree/nodes"             => await OnUi(() => TreeNodes(body)),
                 "/skills/tooltips"        => await OnUi(SkillsTooltips),
                 "/skills/support-picker"          => await OnUi(() => SupportPickerState(body)),
                 "/skills/support-picker/set-tab"  => await OnUi(() => SupportPickerSetTab(body)),
@@ -1326,6 +1331,137 @@ public sealed class IpcServer
             modsTotal = modTotal,
             modsUntranslated = modUntr,
             nodes = nodes.ToArray(),
+        };
+    }
+
+    // ── Tree building (agent-driven allocation) ────────────────────────────
+    // Backed by TreeTabViewModel.AllocatePathTo / DeallocateNode — the same
+    // code the VM tests in PBLEngine.Tests cover; these handlers are thin.
+
+    private static object PointsPayload(PBLEngine.PointUsage? u) => u is null
+        ? (object)null!
+        : new
+        {
+            passivesUsed   = u.PassivesUsed,
+            passivesMax    = u.PassivesMax,
+            ascendancyUsed = u.AscendancyUsed,
+            ascendancyMax  = u.AscendancyMax,
+            weaponSet1Used = u.WeaponSet1Used,
+            weaponSet2Used = u.WeaponSet2Used,
+            weaponSetMax   = u.WeaponSetMax,
+        };
+
+    private static bool OverBudget(PBLEngine.PointUsage? u) =>
+        u is { } v && (v.PassivesUsed > v.PassivesMax || v.AscendancyUsed > v.AscendancyMax);
+
+    private static object TreeAllocated()
+    {
+        if (GetTreeVm() is not { } t) return new { error = "TreeTab not ready." };
+        var alloc = t.AllocatedIds.OrderBy(x => x).ToArray();
+        var byId  = t.Nodes.ToDictionary(n => n.Id);
+        var nodes = alloc.Where(byId.ContainsKey).Select(id => new
+        {
+            id,
+            name       = byId[id].Name,
+            type       = byId[id].Type,
+            ascendancy = byId[id].AscendancyName,
+        }).ToArray();
+        var usage = t.PointUsage;
+        return new
+        {
+            ok         = true,
+            ids        = alloc,
+            nodes,
+            points     = PointsPayload(usage),
+            overBudget = OverBudget(usage),
+        };
+    }
+
+    private static async Task<object> TreeAllocatePath(string body)
+    {
+        if (GetTreeVm() is not { } t) return new { error = "TreeTab not ready." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("nodeId", out var n) || n.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'nodeId'." };
+        string? attribute = req.TryGetValue("attribute", out var a) && a.ValueKind == JsonValueKind.String
+            ? a.GetString()
+            : null;
+
+        var r = await t.AllocatePathTo(n.GetInt32(), attribute);
+        await t.WaitForEngineSettledAsync();   // engine truth before answering
+        var usage = t.PointUsage;
+        return new
+        {
+            ok             = r.Ok,
+            error          = r.Error,
+            path           = r.Path,
+            attributeNodes = r.AttributeNodes,
+            pointsSpent    = r.PointsSpent,
+            points         = PointsPayload(usage),
+            overBudget     = OverBudget(usage),
+        };
+    }
+
+    private static async Task<object> TreeDeallocateNode(string body)
+    {
+        if (GetTreeVm() is not { } t) return new { error = "TreeTab not ready." };
+        var req = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        if (!req.TryGetValue("nodeId", out var n) || n.ValueKind != JsonValueKind.Number)
+            return new { error = "Missing 'nodeId'." };
+
+        var (ok, error, dependents) = await t.DeallocateNode(n.GetInt32());
+        await t.WaitForEngineSettledAsync();
+        return new { ok, error, dependents };
+    }
+
+    private static object TreeNodes(string body)
+    {
+        if (GetTreeVm() is not { } t) return new { error = "TreeTab not ready." };
+        var req = string.IsNullOrWhiteSpace(body)
+            ? new Dictionary<string, JsonElement>()
+            : JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body) ?? new();
+        string? query = req.TryGetValue("query", out var q) && q.ValueKind == JsonValueKind.String
+            ? q.GetString() : null;
+        int? nearId = req.TryGetValue("nearId", out var ni) && ni.ValueKind == JsonValueKind.Number
+            ? ni.GetInt32() : null;
+        int limit = req.TryGetValue("limit", out var l) && l.ValueKind == JsonValueKind.Number
+            ? l.GetInt32() : 50;
+        limit = Math.Clamp(limit, 1, 200);
+
+        var byId = t.Nodes.ToDictionary(n => n.Id);
+        IEnumerable<TreeNodeDto> source = t.Nodes;
+        if (!string.IsNullOrEmpty(query))
+        {
+            source = source.Where(nd =>
+                nd.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                nd.Stats.Any(s => s.Contains(query, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        TreeNodeDto? near = nearId is { } id && byId.TryGetValue(id, out var nd2) ? nd2 : null;
+        if (near is not null)
+            source = source.OrderBy(nd =>
+            {
+                double dx = nd.X - near.X, dy = nd.Y - near.Y;
+                return dx * dx + dy * dy;
+            });
+
+        var selected = source.Take(limit).ToArray();
+        return new
+        {
+            ok    = true,
+            count = selected.Length,
+            nodes = selected.Select(nd => new
+            {
+                id         = nd.Id,
+                x          = nd.X,
+                y          = nd.Y,
+                name       = nd.Name,
+                type       = nd.Type,
+                ascendancy = nd.AscendancyName,
+                allocated  = t.AllocatedIds.Contains(nd.Id),
+                stats      = nd.Stats,
+                linkedIds  = nd.LinkedIds,
+            }).ToArray(),
         };
     }
 

@@ -623,6 +623,88 @@ public class VisualTools
         catch (Exception ex) { return Error(ex); }
     }
 
+    // ── Tree building (agent-driven allocation) ────────────────────────────
+
+    [McpServerTool]
+    [Description(
+        "List allocated passive-tree nodes with point usage: ids, names/types/ascendancy, " +
+        "points (passives/ascendancy/weapon sets) and overBudget flag.")]
+    public async Task<string> VisualTreeAllocated()
+    {
+        try { return await IpcClient.CallAsync("GET", "/tree/allocated"); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Allocate the shortest path from the allocated tree to a node (engine-verified). " +
+        "Attribute path nodes auto-pick, or pass attribute 'str'/'dex'/'int'. Point " +
+        "over-budget is allowed like the UI; response carries overBudget + points.")]
+    public async Task<string> VisualTreeAllocatePath(
+        [Description("Numeric passive-tree node id to allocate.")] int nodeId,
+        [Description("Attribute for '+5 to any attribute' path nodes: 'str', 'dex' or 'int'. Null = engine default.")] string? attribute = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/tree/allocate-path", new { nodeId, attribute }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Refund one allocated passive node. Fails with the dependents list when other " +
+        "allocated nodes rely on it for tree connectivity.")]
+    public async Task<string> VisualTreeDeallocateNode(
+        [Description("Numeric node id to refund.")] int nodeId)
+    {
+        try { return await IpcClient.CallAsync("POST", "/tree/deallocate-node", new { nodeId }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Find passive-tree nodes by name or stat text (case-insensitive substring), " +
+        "optionally sorted by distance from nearId. Returns id, coords, name, type, " +
+        "allocated flag, stats, linked ids — the ids for visual_tree_allocate_path.")]
+    public async Task<string> VisualTreeNodes(
+        [Description("Search query against node name or stat lines. Empty = all nodes.")] string? query = null,
+        [Description("Sort results by distance from this node id.")] int? nearId = null,
+        [Description("Max nodes to return (1-200, default 50).")] int limit = 50)
+    {
+        try { return await IpcClient.CallAsync("POST", "/tree/nodes", new { query, nearId, limit }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Toggle one passive node (allocate if free, refund if allocated). Pass no id to " +
+        "toggle an auto-picked node adjacent to the allocated tree. Prefer " +
+        "visual_tree_allocate_path / visual_tree_deallocate_node for deliberate changes.")]
+    public async Task<string> VisualTreeToggleNode(
+        [Description("Numeric node id, or null to auto-pick.")] int? nodeId = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/tree/toggle-node", new { nodeId }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description("Set the tree search text (highlights matching nodes on the canvas).")]
+    public async Task<string> VisualTreeSetSearch(
+        [Description("Search text, empty to clear.")] string text)
+    {
+        try { return await IpcClient.CallAsync("POST", "/tree/set-search", new { text }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Read passive-node tooltip text (raw + translated): one node by id, or every " +
+        "allocated node when no id is passed.")]
+    public async Task<string> VisualTreeNodeText(
+        [Description("Numeric node id, or null for all allocated nodes.")] int? nodeId = null)
+    {
+        try { return await IpcClient.CallAsync("POST", "/tree/node-text", new { nodeId }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────
 
     private static string FindRepoRoot()
@@ -673,6 +755,48 @@ public class VisualTools
     public async Task<string> VisualTraderSetLeague(string league)
     {
         try { return await IpcClient.CallAsync("POST", "/trader/set-league", new { league }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    // ── Misc app-level wraps ───────────────────────────────────────────────
+
+    [McpServerTool]
+    [Description(
+        "Dump the visible UI text of the running client (all windows, labels, tabs, lists) " +
+        "to verify what the user actually sees.")]
+    public async Task<string> VisualUiText()
+    {
+        try { return await IpcClient.CallAsync("POST", "/ui/text", new { }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Open the character-import window: on the BuildList page it imports a new build " +
+        "from the GGG account; on an open build it updates that build from the game.")]
+    public async Task<string> VisualCharacterImport()
+    {
+        try { return await IpcClient.CallAsync("POST", "/character-import/open", new { }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Open the Import/Export window of the open build (poeplanner/pobintree codes, " +
+        "game guide export). Returns {placedOnScreen}.")]
+    public async Task<string> VisualExportOpen()
+    {
+        try { return await IpcClient.CallAsync("POST", "/export/open", new { }); }
+        catch (Exception ex) { return Error(ex); }
+    }
+
+    [McpServerTool]
+    [Description(
+        "Re-import the currently open build from the game account (same as the " +
+        "'Update from game' button). Requires an imported character.")]
+    public async Task<string> VisualUpdateFromGame()
+    {
+        try { return await IpcClient.CallAsync("POST", "/build/update-from-game", new { }); }
         catch (Exception ex) { return Error(ex); }
     }
 
